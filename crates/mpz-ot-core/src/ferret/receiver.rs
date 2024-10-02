@@ -119,7 +119,7 @@ impl Receiver<state::Extension> {
         let mut x = self.state.e.clone();
         self.state.lpn_encoder.compute(&mut x, &u_block);
 
-        let mut x = x.iter().map(|a| a.lsb() == 1).collect::<Vec<bool>>();
+        let mut x = x.iter().map(|a| a.lsb()).collect::<Vec<bool>>();
 
         let x_ = x.split_off(self.state.lpn_parameters.k);
         let z_ = z.split_off(self.state.lpn_parameters.k);

@@ -20,6 +20,7 @@ pub mod executor;
 mod id;
 #[cfg(any(test, feature = "ideal"))]
 pub mod ideal;
+pub mod load_balance;
 #[cfg(feature = "sync")]
 pub mod sync;
 

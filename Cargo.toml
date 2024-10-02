@@ -17,6 +17,10 @@ members = [
     "crates/clmul",
     "crates/mpz-ole-core",
     "crates/mpz-ole",
+    "crates/mpz-memory-core",
+    "crates/mpz-vm",
+    "crates/mpz-vm-core",
+    "crates/mpz-zk-core",
 ]
 resolver = "2"
 
@@ -41,11 +45,15 @@ mpz-garble-core = { path = "crates/mpz-garble-core" }
 mpz-share-conversion-core = { path = "crates/mpz-share-conversion-core" }
 mpz-ole = { path = "crates/mpz-ole" }
 mpz-ole-core = { path = "crates/mpz-ole-core" }
+mpz-memory-core = { path = "crates/mpz-memory-core" }
+mpz-memory = { path = "crates/mpz-memory" }
+mpz-vm = { path = "crates/mpz-vm" }
+mpz-vm-core = { path = "crates/mpz-vm-core" }
 clmul = { path = "crates/clmul" }
 matrix-transpose = { path = "crates/matrix-transpose" }
 
-tlsn-utils = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "6e0be94" }
-tlsn-utils-aio = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "6e0be94" }
+tlsn-utils = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "046125a" }
+tlsn-utils-aio = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "046125a" }
 
 # rand
 rand_chacha = "0.3"
@@ -124,3 +132,5 @@ typenum = "1"
 generic-array = "0.14"
 itybity = "0.2"
 enum-try-as-inner = "0.1.0"
+bitvec = "1.0"
+hashbrown = "0.14.5"

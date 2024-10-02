@@ -88,6 +88,37 @@ where
         Ok(output)
     }
 
+    async fn blocking_map_unordered<F, T, R, W>(
+        &mut self,
+        f: F,
+        items: Vec<T>,
+        _weight: Option<W>,
+    ) -> Result<Vec<R>, ContextError>
+    where
+        F: for<'a> Fn(&'a mut Self, T) -> ScopedBoxFuture<'static, 'a, R> + Clone + Send + 'static,
+        T: Send + 'static,
+        R: Send + 'static,
+        W: Fn(&T) -> usize + Send + 'static,
+    {
+        let mut ctx = Self {
+            id: self.id.clone(),
+            inner: self.inner.take(),
+        };
+
+        let (inner, outputs) = CpuBackend::blocking_async(async move {
+            let mut outputs = Vec::with_capacity(items.len());
+            for item in items {
+                outputs.push(f(&mut ctx, item).await);
+            }
+            (ctx.inner, outputs)
+        })
+        .await;
+
+        self.inner = inner;
+
+        Ok(outputs)
+    }
+
     async fn join<'a, A, B, RA, RB>(&'a mut self, a: A, b: B) -> Result<(RA, RB), ContextError>
     where
         A: for<'b> FnOnce(&'b mut Self) -> ScopedBoxFuture<'a, 'b, RA> + Send + 'a,

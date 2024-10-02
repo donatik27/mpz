@@ -4,8 +4,7 @@ use mpz_core::{prg::Prg, Block};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::TransferId;
-use crate::{COTReceiverOutput, COTSenderOutput, RCOTReceiverOutput, RCOTSenderOutput};
+use crate::{COTReceiverOutput, COTSenderOutput, RCOTReceiverOutput, RCOTSenderOutput, TransferId};
 
 /// The ideal COT functionality.
 #[derive(Debug)]
@@ -95,29 +94,24 @@ impl IdealCOT {
     /// * `choices` - The choices made by the receiver.
     pub fn correlated(
         &mut self,
+        msgs: Vec<Block>,
         choices: Vec<bool>,
     ) -> (COTSenderOutput<Block>, COTReceiverOutput<Block>) {
-        let (sender_output, mut receiver_output) = self.random_correlated(choices.len());
+        assert_eq!(msgs.len(), choices.len());
 
-        receiver_output
-            .msgs
-            .iter_mut()
-            .zip(choices.iter().zip(receiver_output.choices))
-            .for_each(|(msg, (&actual_choice, random_choice))| {
-                if actual_choice ^ random_choice {
-                    *msg ^= self.delta
-                }
-            });
+        let mut received = msgs.clone();
+        received.iter_mut().zip(choices).for_each(|(msg, choice)| {
+            if choice {
+                *msg ^= self.delta
+            }
+        });
+
+        self.counter += msgs.len();
+        let id = self.transfer_id.next();
 
         (
-            COTSenderOutput {
-                id: sender_output.id,
-                msgs: sender_output.msgs,
-            },
-            COTReceiverOutput {
-                id: receiver_output.id,
-                msgs: receiver_output.msgs,
-            },
+            COTSenderOutput { id, msgs },
+            COTReceiverOutput { id, msgs: received },
         )
     }
 }
@@ -156,11 +150,12 @@ mod tests {
         let mut ideal = IdealCOT::default();
 
         let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let msgs = Block::random_vec(&mut rng, 100);
         let mut choices = vec![false; 100];
         rng.fill(&mut choices[..]);
 
         let (COTSenderOutput { msgs, .. }, COTReceiverOutput { msgs: received, .. }) =
-            ideal.correlated(choices.clone());
+            ideal.correlated(msgs, choices.clone());
 
         assert_cot(ideal.delta(), &choices, &msgs, &received)
     }

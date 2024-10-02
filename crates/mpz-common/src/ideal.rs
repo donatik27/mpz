@@ -35,6 +35,11 @@ impl<F> Clone for Alice<F> {
 
 impl<F> Alice<F> {
     /// Returns a lock to the ideal functionality.
+    pub fn get(&self) -> MutexGuard<'_, F> {
+        self.f.lock().unwrap()
+    }
+
+    /// Returns a lock to the ideal functionality.
     pub fn get_mut(&mut self) -> MutexGuard<'_, F> {
         self.f.lock().unwrap()
     }

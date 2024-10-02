@@ -3,7 +3,15 @@ use std::ops::Index;
 use mpz_core::Block;
 use serde::{Deserialize, Serialize};
 
-use crate::{EncodingCommitment, DEFAULT_BATCH_SIZE};
+use crate::DEFAULT_BATCH_SIZE;
+
+#[derive(Debug, Clone)]
+pub struct GarbledCircuit {
+    /// Encrypted gates.
+    pub gates: Vec<EncryptedGate>,
+    /// Commitments to the output MACs.
+    pub commitments: Option<Vec<[Block; 2]>>,
+}
 
 /// Encrypted gate truth table
 ///
@@ -17,13 +25,6 @@ pub struct EncryptedGate(#[serde(with = "serde_arrays")] pub(crate) [Block; 2]);
 impl EncryptedGate {
     pub(crate) fn new(inner: [Block; 2]) -> Self {
         Self(inner)
-    }
-
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        bytes[..16].copy_from_slice(&self.0[0].to_bytes());
-        bytes[16..].copy_from_slice(&self.0[1].to_bytes());
-        bytes
     }
 }
 
@@ -55,13 +56,4 @@ impl<const N: usize> EncryptedGateBatch<N> {
     pub fn into_array(self) -> [EncryptedGate; N] {
         self.0
     }
-}
-
-/// A garbled circuit
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GarbledCircuit {
-    /// Encrypted gates of the circuit
-    pub gates: Vec<EncryptedGate>,
-    /// Encoding commitments of the circuit outputs
-    pub commitments: Option<Vec<EncodingCommitment>>,
 }

@@ -88,6 +88,33 @@ impl Context for DummyExecutor {
         Ok(CpuBackend::blocking_async(async move { f(&mut ctx).await }).await)
     }
 
+    async fn blocking_map_unordered<F, T, R, W>(
+        &mut self,
+        f: F,
+        items: Vec<T>,
+        _weight: Option<W>,
+    ) -> Result<Vec<R>, ContextError>
+    where
+        F: for<'a> FnOnce(&'a mut Self, T) -> ScopedBoxFuture<'static, 'a, R>
+            + Clone
+            + Send
+            + 'static,
+        T: Send + 'static,
+        R: Send + 'static,
+        W: Fn(&T) -> usize + Send + 'static,
+    {
+        let mut output = Vec::with_capacity(items.len());
+        for item in items {
+            let mut ctx = Self {
+                id: self.id.clone(),
+                io: DummyIo,
+            };
+            let f = f.clone();
+            output.push(CpuBackend::blocking_async(async move { f(&mut ctx, item).await }).await);
+        }
+        Ok(output)
+    }
+
     async fn join<'a, A, B, RA, RB>(&'a mut self, a: A, b: B) -> Result<(RA, RB), ContextError>
     where
         A: for<'b> FnOnce(&'b mut Self) -> ScopedBoxFuture<'a, 'b, RA> + Send + 'a,

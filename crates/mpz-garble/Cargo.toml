@@ -11,15 +11,18 @@ name = "mpz_garble"
 
 [features]
 default = ["mock"]
-rayon = ["mpz-common/rayon"]
+rayon = ["mpz-common/rayon", "mpz-garble-core/rayon"]
 mock = ["mpz-ot/ideal"]
 
 [dependencies]
 mpz-circuits.workspace = true
 mpz-common = { workspace = true, features = ["test-utils"] }
+mpz-memory-core = { workspace = true }
 mpz-ot.workspace = true
 mpz-garble-core.workspace = true
 mpz-core.workspace = true
+mpz-vm = { workspace = true }
+mpz-vm-core = { workspace = true }
 tlsn-utils.workspace = true
 tlsn-utils-aio.workspace = true
 serio.workspace = true
@@ -38,6 +41,9 @@ derive_builder.workspace = true
 itybity.workspace = true
 tracing.workspace = true
 opaque-debug.workspace = true
+bitvec = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+hashbrown = { workspace = true }
 
 [dev-dependencies]
 mpz-common = { workspace = true, features = ["test-utils", "ideal"] }
@@ -55,5 +61,5 @@ async_executors = { version = "0.6", features = ["notwasm", "tokio_tp"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [[bench]]
-name = "deap"
+name = "semihonest"
 harness = false

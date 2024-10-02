@@ -78,6 +78,34 @@ pub trait Context: Send + Sync {
         F: for<'a> FnOnce(&'a mut Self) -> ScopedBoxFuture<'static, 'a, R> + Send + 'static,
         R: Send + 'static;
 
+    /// Maps a closure over a list of items without preserving the order.
+    ///
+    /// If CPU multi-threading is available, the tasks are executed in parallel. Otherwise, the tasks
+    /// are executed sequentially on the current thread and can block the executor.
+    ///
+    /// # Deadlocks
+    ///
+    /// This method may cause deadlocks if a task blocks and the executor can not make progress.
+    /// Generally, one should *never* block across an await point. This method is intended for operations
+    /// that are CPU-bound but require access to a thread context.
+    ///
+    /// # Arguments
+    ///
+    /// * `f`: The closure to map over the items.
+    /// * `items`: The items to process.
+    /// * `weight`: An optional weight function which is used to evenly distribute the items across threads.
+    async fn blocking_map_unordered<F, T, R, W>(
+        &mut self,
+        f: F,
+        items: Vec<T>,
+        weight: Option<W>,
+    ) -> Result<Vec<R>, ContextError>
+    where
+        F: for<'a> Fn(&'a mut Self, T) -> ScopedBoxFuture<'static, 'a, R> + Clone + Send + 'static,
+        T: Send + 'static,
+        R: Send + 'static,
+        W: Fn(&T) -> usize + Send + 'static;
+
     /// Forks the thread and executes the provided closures concurrently.
     ///
     /// Implementations may not be able to fork, in which case the closures are executed

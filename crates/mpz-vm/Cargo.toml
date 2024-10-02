@@ -1,0 +1,15 @@
+[package]
+name = "mpz-vm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mpz-vm-core = { workspace = true }
+mpz-memory-core = { workspace = true }
+mpz-circuits = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true

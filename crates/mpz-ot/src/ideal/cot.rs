@@ -15,12 +15,12 @@ use crate::{COTReceiver, COTSender, OTError, OTSetup, RandomCOTReceiver, RandomC
 
 fn cot(
     f: &mut IdealCOT,
-    sender_count: usize,
+    msgs: Vec<Block>,
     choices: Vec<bool>,
 ) -> (COTSenderOutput<Block>, COTReceiverOutput<Block>) {
-    assert_eq!(sender_count, choices.len());
+    assert_eq!(msgs.len(), choices.len());
 
-    f.correlated(choices)
+    f.correlated(msgs, choices)
 }
 
 fn rcot(
@@ -39,6 +39,14 @@ pub fn ideal_cot() -> (IdealCOTSender, IdealCOTReceiver) {
     (IdealCOTSender(alice), IdealCOTReceiver(bob))
 }
 
+/// Returns an ideal COT sender and receiver with a specific delta value.
+pub fn ideal_cot_with_delta(delta: Block) -> (IdealCOTSender, IdealCOTReceiver) {
+    let mut cot = IdealCOT::default();
+    cot.set_delta(delta);
+    let (alice, bob) = ideal_f2p(cot);
+    (IdealCOTSender(alice), IdealCOTReceiver(bob))
+}
+
 /// Returns an ideal random COT sender and receiver.
 pub fn ideal_rcot() -> (IdealCOTSender, IdealCOTReceiver) {
     let (alice, bob) = ideal_f2p(IdealCOT::default());
@@ -48,6 +56,13 @@ pub fn ideal_rcot() -> (IdealCOTSender, IdealCOTReceiver) {
 /// Ideal COT sender.
 #[derive(Debug, Clone)]
 pub struct IdealCOTSender(Alice<IdealCOT>);
+
+impl IdealCOTSender {
+    /// Sets the delta value.
+    pub fn set_delta(&mut self, delta: Block) {
+        self.0.get_mut().set_delta(delta);
+    }
+}
 
 #[async_trait]
 impl<Ctx> OTSetup<Ctx> for IdealCOTSender
@@ -77,12 +92,16 @@ where
 
 #[async_trait]
 impl<Ctx: Context> COTSender<Ctx, Block> for IdealCOTSender {
+    fn delta(&self) -> Block {
+        self.0.get().delta()
+    }
+
     async fn send_correlated(
         &mut self,
         ctx: &mut Ctx,
-        count: usize,
+        msgs: &[Block],
     ) -> Result<COTSenderOutput<Block>, OTError> {
-        Ok(self.0.call(ctx, count, cot).await)
+        Ok(self.0.call(ctx, msgs.to_vec(), cot).await)
     }
 }
 
@@ -166,6 +185,7 @@ mod tests {
         let delta = alice.0.get_mut().delta();
 
         let count = 10;
+        let msgs = Block::random_vec(&mut rng, count);
         let choices = (0..count).map(|_| rng.gen()).collect::<Vec<bool>>();
 
         let (
@@ -178,7 +198,7 @@ mod tests {
                 msgs: receiver_msgs,
             },
         ) = tokio::try_join!(
-            alice.send_correlated(&mut ctx_a, count),
+            alice.send_correlated(&mut ctx_a, &msgs),
             bob.receive_correlated(&mut ctx_b, &choices)
         )
         .unwrap();

@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{mem, pin::Pin};
 
 use async_trait::async_trait;
 use futures::{stream::FuturesOrdered, Future, StreamExt};
@@ -9,6 +9,7 @@ use uid_mux::FramedUidMux;
 use crate::{
     context::{ContextError, ErrorKind},
     cpu::CpuBackend,
+    load_balance::distribute_by_weight,
     Context, ThreadId,
 };
 
@@ -180,6 +181,63 @@ where
         Ok(output)
     }
 
+    async fn blocking_map_unordered<F, T, R, W>(
+        &mut self,
+        f: F,
+        items: Vec<T>,
+        weight: Option<W>,
+    ) -> Result<Vec<R>, ContextError>
+    where
+        F: for<'a> Fn(&'a mut Self, T) -> ScopedBoxFuture<'static, 'a, R> + Clone + Send + 'static,
+        T: Send + 'static,
+        R: Send + 'static,
+        W: Fn(&T) -> usize + Send + 'static,
+    {
+        // We temporarily take the state to avoid borrowing issues.
+        let mut inner = self
+            .inner
+            .take()
+            .expect("context is never left uninitialized");
+
+        if inner.children.len() < self.max_concurrency {
+            if let Err(e) = inner.children.alloc(&self.mux, self.max_concurrency).await {
+                self.inner = Some(inner);
+                return Err(e);
+            }
+        }
+
+        let contexts = mem::take(&mut inner.children.slots);
+
+        let threads = if let Some(weight) = weight {
+            distribute_by_weight(items, weight, self.max_concurrency)
+        } else {
+            distribute_by_weight(items, |_| 1, self.max_concurrency)
+        };
+
+        let mut queue = FuturesOrdered::new();
+
+        for (items, mut ctx) in threads.into_iter().zip(contexts) {
+            let f = f.clone();
+            queue.push_back(CpuBackend::blocking_async(async move {
+                let mut outputs = Vec::new();
+                for item in items {
+                    outputs.push(f(&mut ctx, item).await);
+                }
+                (outputs, ctx)
+            }));
+        }
+
+        let mut outputs = Vec::new();
+        for (thread_outputs, ctx) in queue.collect::<Vec<_>>().await {
+            inner.children.slots.push(ctx);
+            outputs.extend(thread_outputs);
+        }
+
+        self.inner = Some(inner);
+
+        Ok(outputs)
+    }
+
     async fn join<'a, A, B, RA, RB>(&'a mut self, a: A, b: B) -> Result<(RA, RB), ContextError>
     where
         A: for<'b> FnOnce(&'b mut Self) -> ScopedBoxFuture<'a, 'b, RA> + Send + 'a,
@@ -200,7 +258,7 @@ where
             }
         }
 
-        let [child_a, child_b] = inner.children.first_n_mut();
+        let [child_a, child_b] = inner.children.const_first_n_mut();
 
         let output = futures::join!(a(child_a), b(child_b));
 
@@ -234,7 +292,7 @@ where
             }
         }
 
-        let [child_a, child_b] = inner.children.first_n_mut();
+        let [child_a, child_b] = inner.children.const_first_n_mut();
 
         let output = futures::try_join!(a(child_a), b(child_b));
 
@@ -311,7 +369,7 @@ where
         Ok(())
     }
 
-    fn first_n_mut<const N: usize>(&mut self) -> &mut [MTContext<M, Io>; N] {
+    fn const_first_n_mut<const N: usize>(&mut self) -> &mut [MTContext<M, Io>; N] {
         self.slots
             .first_chunk_mut()
             .expect("number of threads were checked")
