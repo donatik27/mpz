@@ -91,7 +91,8 @@ impl VerifierStore {
         Ok(())
     }
 
-    /// Buffers a decoding operation, returning a future which will resolve to the value when it is ready.
+    /// Buffers a decoding operation, returning a future which will resolve to
+    /// the value when it is ready.
     pub fn decode(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
         let (fut, op) = DecodeFuture::new(slice);
 
@@ -102,7 +103,8 @@ impl VerifierStore {
 
     /// Executes assignment operations.
     ///
-    /// Returns the payload to send to the prover as well as the keys to send using oblivious transfer.
+    /// Returns the payload to send to the prover as well as the keys to send
+    /// using oblivious transfer.
     pub fn execute_assign(&mut self, payload: AssignPayload) -> Result<()> {
         let idx_expected = RangeSet::from(mem::take(&mut self.buffer_assign));
 
@@ -115,8 +117,8 @@ impl VerifierStore {
         let mut i = 0;
         for range in idx.iter_ranges() {
             let slice = Slice::from_range_unchecked(range);
-            self.key_store.adjust(slice, &adjust[i..i + slice.size()])?;
-            i += slice.size();
+            self.key_store.adjust(slice, &adjust[i..i + slice.len()])?;
+            i += slice.len();
         }
 
         Ok(())

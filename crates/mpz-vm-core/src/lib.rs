@@ -1,11 +1,11 @@
 mod decode;
 
-pub use decode::{DecodeFuture, DecodeOp};
+pub use decode::{DecodeFuture, DecodeFutureTyped, DecodeOp};
 
 use std::sync::Arc;
 
 use mpz_circuits::Circuit;
-use mpz_memory_core::{AssignKind, Size, Slice};
+use mpz_memory_core::{AssignKind, Slice, ToRaw};
 
 #[derive(Debug, Clone)]
 pub struct AssignOp {
@@ -27,6 +27,51 @@ pub enum CallError {
     },
 }
 
+#[derive(Debug)]
+pub struct CallBuilder {
+    circ: Arc<Circuit>,
+    inputs: Vec<Slice>,
+}
+
+impl CallBuilder {
+    pub fn new(circ: Arc<Circuit>) -> Self {
+        let input_len = circ.inputs().len();
+        Self {
+            circ,
+            inputs: Vec::with_capacity(input_len),
+        }
+    }
+
+    pub fn arg<T: ToRaw>(mut self, arg: T) -> Self {
+        self.inputs.push(arg.to_raw());
+        self
+    }
+
+    pub fn build(self) -> Result<Call, CallError> {
+        if self.circ.inputs().len() != self.inputs.len() {
+            return Err(CallError::InputCount {
+                expected: self.circ.inputs().len(),
+                actual: self.inputs.len(),
+            });
+        }
+
+        for (idx, (slice, input)) in self.inputs.iter().zip(self.circ.inputs()).enumerate() {
+            if slice.len() != input.len() {
+                return Err(CallError::InputLength {
+                    idx,
+                    expected: input.len(),
+                    actual: slice.len(),
+                });
+            }
+        }
+
+        Ok(Call {
+            circ: self.circ,
+            inputs: self.inputs,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Call {
     circ: Arc<Circuit>,
@@ -34,26 +79,9 @@ pub struct Call {
 }
 
 impl Call {
-    /// Creates a new call.
-    pub fn new(circ: Arc<Circuit>, inputs: Vec<Slice>) -> Result<Self, CallError> {
-        if circ.inputs().len() != inputs.len() {
-            return Err(CallError::InputCount {
-                expected: circ.inputs().len(),
-                actual: inputs.len(),
-            });
-        }
-
-        for (idx, (circ_input, input)) in circ.inputs().iter().zip(&inputs).enumerate() {
-            if circ_input.len() != input.size() {
-                return Err(CallError::InputLength {
-                    idx,
-                    expected: circ_input.len(),
-                    actual: input.size(),
-                });
-            }
-        }
-
-        Ok(Self { circ, inputs })
+    /// Creates a new call builder.
+    pub fn new(circ: Arc<Circuit>) -> CallBuilder {
+        CallBuilder::new(circ)
     }
 
     /// Returns the circuit.

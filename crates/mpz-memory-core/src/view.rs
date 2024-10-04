@@ -7,9 +7,11 @@ use crate::{Range, RangeSet, Slice};
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct View {
     len: usize,
+    uninit: RangeSet,
     public: RangeSet,
     private: RangeSet,
     blind: RangeSet,
+    visible: RangeSet,
 }
 
 impl View {
@@ -19,13 +21,10 @@ impl View {
     }
 
     /// Allocates memory.
-    ///
-    /// Memory is marked blind by default.
     pub fn alloc(&mut self, len: usize) {
-        let start = self.len;
+        let end = self.len;
         self.len += len;
-
-        self.blind = self.blind.union(&(start..self.len));
+        self.uninit = self.uninit.union(&(end..end + len));
     }
 
     /// Returns the public ranges.
@@ -43,14 +42,29 @@ impl View {
         &self.blind
     }
 
-    /// Returns the public, private, and blind ranges for the given range.
-    pub fn partition(&self, slice: Slice) -> (RangeSet, RangeSet, RangeSet) {
-        let range = slice.to_range();
-        let public = self.public.intersection(&range);
-        let private = self.private.intersection(&range);
-        let blind = self.blind.intersection(&range);
+    /// Returns the visible ranges.
+    pub fn visible(&self) -> &RangeSet {
+        &self.visible
+    }
 
-        (public, private, blind)
+    /// Returns `true` if all data in the slice is set.
+    pub fn is_set(&self, slice: Slice) -> bool {
+        slice.to_range().is_disjoint(&self.uninit)
+    }
+
+    /// Returns `true` if any data in the slice is set.
+    pub fn is_set_any(&self, slice: Slice) -> bool {
+        !slice.to_range().difference(&self.uninit).is_empty()
+    }
+
+    /// Returns `true` if all data in the slice is visible.
+    pub fn is_visible(&self, slice: Slice) -> bool {
+        slice.to_range().is_subset(&self.visible)
+    }
+
+    /// Returns `true` if any data in the slice is visible.
+    pub fn is_visible_any(&self, slice: Slice) -> bool {
+        !slice.to_range().is_disjoint(&self.visible)
     }
 
     /// Returns `true` if all data in the slice is public.
@@ -87,6 +101,8 @@ impl View {
     pub fn set_public(&mut self, slice: Slice) {
         let range = slice.to_range();
         self.public = self.public.union(&range);
+        self.visible = self.visible.union(&range);
+        self.uninit = self.uninit.difference(&range);
         self.private = self.private.difference(&range);
         self.blind = self.blind.difference(&range);
     }
@@ -95,6 +111,8 @@ impl View {
     pub fn set_private(&mut self, slice: Slice) {
         let range = slice.to_range();
         self.private = self.private.union(&range);
+        self.visible = self.visible.union(&range);
+        self.uninit = self.uninit.difference(&range);
         self.public = self.public.difference(&range);
         self.blind = self.blind.difference(&range);
     }
@@ -103,6 +121,8 @@ impl View {
     pub fn set_blind(&mut self, slice: Slice) {
         let range = slice.to_range();
         self.blind = self.blind.union(&range);
+        self.visible = self.visible.difference(&range);
+        self.uninit = self.uninit.difference(&range);
         self.public = self.public.difference(&range);
         self.private = self.private.difference(&range);
     }
@@ -130,6 +150,11 @@ mod tests {
     #[test]
     fn test_view() {
         let mut view = View::new();
+        view.alloc(30);
+
+        let slice = Slice::from_range_unchecked(0..10);
+        assert!(!view.is_set(slice));
+        assert!(!view.is_set_any(slice));
 
         view.set_public(Slice::from_range_unchecked(0..10));
         view.set_private(Slice::from_range_unchecked(10..20));

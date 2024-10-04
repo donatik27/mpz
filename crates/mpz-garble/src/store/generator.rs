@@ -3,7 +3,10 @@ use mpz_core::{
     bitvec::{BitSlice, BitVec},
     Block,
 };
-use mpz_garble_core::store::{GeneratorStore as Core, GeneratorStoreError as CoreError};
+use mpz_garble_core::store::{
+    EvaluatorSync, GeneratorStore as Core, GeneratorStoreError as CoreError, GeneratorSync,
+    OTKeyPayload,
+};
 use mpz_memory_core::{
     correlated::{Delta, Key},
     Slice,
@@ -68,19 +71,28 @@ impl GeneratorStore {
         self.inner.set_output(slice, keys).map_err(Error::from)
     }
 
-    /// Assigns a public value.
-    pub fn assign_public(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.inner.assign_public(slice, data).map_err(Error::from)
+    /// Sets the slice as public.
+    pub fn configure_public(&mut self, slice: Slice) -> Result<()> {
+        self.inner.configure_public(slice).map_err(Error::from)
     }
 
-    /// Assigns a private value.
-    pub fn assign_private(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.inner.assign_private(slice, data).map_err(Error::from)
+    /// Sets the slice as private.
+    pub fn configure_private(&mut self, slice: Slice) -> Result<()> {
+        self.inner.configure_private(slice).map_err(Error::from)
     }
 
-    /// Assigns a blind value.
-    pub fn assign_blind(&mut self, slice: Slice) -> Result<()> {
-        self.inner.assign_blind(slice).map_err(Error::from)
+    /// Sets the slice as blind.
+    pub fn configure_blind(&mut self, slice: Slice) -> Result<()> {
+        self.inner.configure_blind(slice).map_err(Error::from)
+    }
+
+    /// Assigns data to memory.
+    pub fn assign(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
+        self.inner.assign(slice, data).map_err(Error::from)
+    }
+
+    pub fn commit(&mut self, slice: Slice) -> Result<()> {
+        self.inner.commit(slice).map_err(Error::from)
     }
 
     /// Buffers a decoding operation, returning a future which will resolve to
@@ -89,10 +101,10 @@ impl GeneratorStore {
         self.inner.decode(slice).map_err(Error::from)
     }
 
-    /// Commits the memory.
+    /// Synchronizes the memory.
     ///
     /// This executes all ready assignment and decoding operations.
-    pub async fn commit<Ctx, OT>(&mut self, ctx: &mut Ctx, ot: &mut OT) -> Result<()>
+    pub async fn sync<Ctx, OT>(&mut self, ctx: &mut Ctx, ot: &mut OT) -> Result<()>
     where
         Ctx: Context,
         OT: COTSender<Ctx, Block> + Send,
@@ -102,32 +114,48 @@ impl GeneratorStore {
             todo!()
         }
 
-        if self.inner.wants_assign() {
-            let (payload, ot_keys) = self.inner.execute_assign()?;
+        let mut msg = GeneratorSync::default();
 
-            if !ot_keys.is_empty() {
-                ctx.try_join(
-                    scoped!(move |ctx| ctx.io_mut().send(payload).await.map_err(Error::from)),
-                    scoped!(move |ctx| ot
-                        .send_correlated(ctx, Key::as_blocks(&ot_keys))
-                        .await
-                        .map_err(Error::from)),
-                )
-                .await??;
-            } else {
-                ctx.io_mut().send(payload).await?;
-            }
+        if self.inner.wants_commit() {
+            msg.macs = Some(self.inner.send_macs()?)
         }
+
+        let ot_payload = if self.inner.wants_oblivious_transfer() {
+            let payload = self.inner.oblivious_transfer()?;
+            msg.idx_ot = Some(payload.idx.clone());
+            Some(payload)
+        } else {
+            None
+        };
 
         if self.inner.wants_send_key_bits() {
-            let key_bits = self.inner.send_key_bits()?;
-            ctx.io_mut().send(key_bits).await?;
+            msg.key_bits = Some(self.inner.send_key_bits()?)
         }
 
-        if self.inner.wants_verify_data() {
-            let payload = ctx.io_mut().expect_next().await?;
-            self.inner.verify_macs(payload)?;
-        }
+        let expected_idx_ot = ot_payload.as_ref().map(|p| p.idx.clone());
+
+        ctx.try_join(
+            scoped!(move |ctx| ctx.io_mut().send(msg).await.map_err(Error::from)),
+            scoped!(move |ctx| {
+                let EvaluatorSync { idx_ot, macs } = ctx.io_mut().expect_next().await?;
+
+                if idx_ot != expected_idx_ot {
+                    assert_eq!(idx_ot, expected_idx_ot);
+                }
+
+                if let Some(payload) = ot_payload {
+                    ot.send_correlated(ctx, Key::as_blocks(&payload.keys))
+                        .await?;
+                }
+
+                if let Some(macs) = macs {
+                    self.inner.verify_macs(macs)?;
+                }
+
+                Ok(())
+            }),
+        )
+        .await??;
 
         Ok(())
     }

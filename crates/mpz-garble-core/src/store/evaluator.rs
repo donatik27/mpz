@@ -5,15 +5,15 @@ use mpz_memory_core::{
     correlated::{Mac, MacStore, MacStoreError},
     store::{BitStore, StoreError},
     view::View,
-    AssignKind, Size, Slice,
+    AssignKind, Slice,
 };
 use mpz_vm_core::{AssignOp, DecodeFuture, DecodeOp};
 use utils::{
     filter_drain::FilterDrain,
-    range::{Difference, Intersection, Subset, Union},
+    range::{Difference, Disjoint, Intersection, Subset, Union},
 };
 
-use crate::store::{AssignPayload, DecodePayload, MacPayload};
+use crate::store::{KeyBitPayload, MacPayload, MacProof};
 
 type Error = EvaluatorStoreError;
 type Result<T> = core::result::Result<T, Error>;
@@ -21,11 +21,15 @@ type RangeSet = utils::range::RangeSet<usize>;
 
 #[derive(Debug, Default)]
 pub struct EvaluatorStore {
-    view: View,
     mac_store: MacStore,
     key_bit_store: BitStore,
     data_store: BitStore,
+    view: View,
 
+    /// Ranges for which commitment is pending.
+    idx_pending_commit: RangeSet,
+    /// Ranges which have been committed.
+    idx_committed: RangeSet,
     /// Ranges for which key bits have been received.
     idx_key_bits: RangeSet,
     /// Ranges for which key bits are pending.
@@ -35,7 +39,6 @@ pub struct EvaluatorStore {
     /// Ranges for which we are waiting to send MACs.
     idx_pending_decode: RangeSet,
 
-    buffer_assign: Vec<AssignOp>,
     buffer_decode: Vec<DecodeOp<BitVec>>,
 }
 
@@ -58,10 +61,21 @@ impl EvaluatorStore {
         self.data_store.is_set(slice)
     }
 
-    pub fn wants_assign(&self) -> bool {
-        !self.buffer_assign.is_empty()
+    /// Returns `true` if the store is ready to receive MACs.
+    pub fn wants_commit(&self) -> bool {
+        !self.idx_pending_commit.is_empty()
     }
 
+    /// Returns `true` if the store is ready to receive MACs using oblivious
+    /// transfer.
+    pub fn wants_oblivious_transfer(&self) -> bool {
+        !self
+            .idx_pending_commit
+            .intersection(self.view.private())
+            .is_empty()
+    }
+
+    /// Returns `true` if the store is ready to receive key bits.
     pub fn wants_key_bits(&self) -> bool {
         !self
             .idx_pending_key_bits
@@ -69,8 +83,12 @@ impl EvaluatorStore {
             .is_empty()
     }
 
-    pub fn wants_decode(&self) -> bool {
-        !self.idx_pending_decode.is_empty()
+    /// Returns `true` if the store is ready to prove MACs.
+    pub fn wants_prove_macs(&self) -> bool {
+        !self
+            .idx_pending_decode
+            .intersection(self.mac_store.set_ranges())
+            .is_empty()
     }
 
     pub fn try_get_macs(&self, slice: Slice) -> Result<&[Mac]> {
@@ -81,37 +99,57 @@ impl EvaluatorStore {
         self.mac_store.try_set(slice, macs).map_err(Error::from)
     }
 
-    pub fn assign_public(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.data_store.try_set(slice, data)?;
+    /// Configures the slice as public.
+    pub fn configure_public(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            todo!("view is already set");
+        }
+
         self.view.set_public(slice);
 
-        self.buffer_assign.push(AssignOp {
-            slice,
-            kind: AssignKind::Public,
-        });
-
         Ok(())
     }
 
-    pub fn assign_private(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.data_store.try_set(slice, data)?;
+    /// Configures the slice as private.
+    pub fn configure_private(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            todo!("view is already set");
+        }
+
         self.view.set_private(slice);
 
-        self.buffer_assign.push(AssignOp {
-            slice,
-            kind: AssignKind::Private,
-        });
+        Ok(())
+    }
+
+    /// Configures the slice as blind.
+    pub fn configure_blind(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            todo!("view is already set");
+        }
+
+        self.view.set_blind(slice);
 
         Ok(())
     }
 
-    pub fn assign_blind(&mut self, slice: Slice) -> Result<()> {
-        self.view.set_blind(slice);
+    pub fn assign(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
+        if !self.view.is_visible(slice) {
+            todo!("memory not configured as visible");
+        }
 
-        self.buffer_assign.push(AssignOp {
-            slice,
-            kind: AssignKind::Blind,
-        });
+        self.data_store.try_set(slice, data)?;
+
+        Ok(())
+    }
+
+    /// Commits the slice.
+    pub fn commit(&mut self, slice: Slice) -> Result<()> {
+        let range = slice.to_range();
+        if !range.is_disjoint(&self.idx_committed) {
+            todo!("slice already committed");
+        }
+
+        self.idx_pending_commit = range.union(&self.idx_pending_commit);
 
         Ok(())
     }
@@ -146,54 +184,42 @@ impl EvaluatorStore {
         Ok(fut)
     }
 
-    /// Executes assignment operations.
-    ///
-    /// Returns a receiver for the assignment payload and the choices for
-    /// oblivious transfer.
-    pub fn execute_assign(&mut self) -> Result<(ReceiveAssign<'_>, Vec<bool>)> {
-        self.buffer_assign.sort_by_key(|op| op.slice.ptr());
+    /// Receives MACs from the generator.
+    pub fn receive_macs(&mut self, payload: MacPayload) -> Result<()> {
+        let MacPayload { idx, macs } = payload;
 
-        let mut idx_direct = Vec::new();
-        let mut idx_oblivious = Vec::new();
-        for op in mem::take(&mut self.buffer_assign) {
-            match op.kind {
-                AssignKind::Public | AssignKind::Blind => {
-                    idx_direct.push(op.slice.to_range());
-                }
-                AssignKind::Private => {
-                    idx_oblivious.push(op.slice.to_range());
-                }
-            }
+        let expected_idx = self.idx_pending_commit.difference(self.view.private());
+
+        if idx != expected_idx {
+            assert_eq!(idx, expected_idx);
         }
 
-        let idx_direct = RangeSet::from(idx_direct);
-        let idx_oblivious = RangeSet::from(idx_oblivious);
-
-        let mut choices = Vec::new();
-        for range in idx_oblivious.iter_ranges() {
+        let mut i = 0;
+        for range in idx.iter_ranges() {
             let slice = Slice::from_range_unchecked(range);
-            choices.extend(
-                self.data_store
-                    .try_get(slice)
-                    .expect("data should be set")
-                    .iter()
-                    .by_vals(),
-            );
+
+            // Store protects against MACs being overwritten.
+            self.mac_store.try_set(slice, &macs[i..i + slice.len()])?;
+
+            i += slice.len();
         }
 
-        Ok((
-            ReceiveAssign {
-                store: self,
-                idx_direct,
-                idx_oblivious,
-            },
-            choices,
-        ))
+        self.idx_pending_commit = self.idx_pending_commit.difference(&idx);
+        self.decode_macs();
+
+        Ok(())
+    }
+
+    /// Receives MACs from the generator using oblivious transfer.
+    pub fn oblivious_transfer(&mut self) -> Result<ObliviousTransfer<'_>> {
+        let idx = self.idx_pending_commit.intersection(self.view.private());
+
+        Ok(ObliviousTransfer { store: self, idx })
     }
 
     /// Receives key bits from the generator.
-    pub fn receive_key_bits(&mut self, payload: DecodePayload) -> Result<()> {
-        let DecodePayload { idx, key_bits } = payload;
+    pub fn receive_key_bits(&mut self, payload: KeyBitPayload) -> Result<()> {
+        let KeyBitPayload { idx, key_bits } = payload;
 
         if !idx.is_subset(&self.idx_pending_key_bits) {
             todo!("unexpected key bits");
@@ -202,11 +228,11 @@ impl EvaluatorStore {
         let mut i = 0;
         for range in idx.iter_ranges() {
             let slice = Slice::from_range_unchecked(range);
-            let key_bits = &key_bits[i..i + slice.size()];
+            let key_bits = &key_bits[i..i + slice.len()];
 
             self.key_bit_store.try_set(slice, key_bits)?;
 
-            i += slice.size();
+            i += slice.len();
         }
 
         self.idx_pending_key_bits = self.idx_pending_key_bits.difference(&idx);
@@ -226,10 +252,8 @@ impl EvaluatorStore {
         Ok(())
     }
 
-    /// Executes ready decode operations.
-    ///
-    /// Returns MAC proof to send to the generator.
-    pub fn send_macs(&mut self) -> Result<MacPayload> {
+    /// Proves MACs to the generator.
+    pub fn prove_macs(&mut self) -> Result<MacProof> {
         let idx = self
             .idx_pending_decode
             .intersection(self.mac_store.set_ranges());
@@ -239,7 +263,7 @@ impl EvaluatorStore {
         self.idx_pending_decode = self.idx_pending_decode.difference(&idx);
         self.idx_decoded = self.idx_decoded.union(&idx);
 
-        Ok(MacPayload { idx, bits, proof })
+        Ok(MacProof { idx, bits, proof })
     }
 
     /// Decodes all data which is not set but we have the MACs and key bits.
@@ -270,57 +294,66 @@ impl EvaluatorStore {
                 .try_set(slice, &data)
                 .expect("data should not be set");
         }
+
+        for mut op in self
+            .buffer_decode
+            .filter_drain(|op| self.data_store.is_set(op.slice))
+        {
+            let data = self
+                .data_store
+                .try_get(op.slice)
+                .expect("data should be set");
+            op.send(data.to_bitvec()).unwrap();
+        }
     }
 }
 
 #[must_use]
-pub struct ReceiveAssign<'a> {
+pub struct ObliviousTransfer<'a> {
     store: &'a mut EvaluatorStore,
-    idx_direct: RangeSet,
-    idx_oblivious: RangeSet,
+    idx: RangeSet,
 }
 
-impl ReceiveAssign<'_> {
-    /// Receives the MACs from the generator.
-    ///
-    /// # Arguments
-    ///
-    /// * `payload` - Assignment payload.
-    /// * `oblivious` - MACs received via oblivious transfer.
-    pub fn receive(self, payload: AssignPayload, oblivious_macs: Vec<Mac>) -> Result<()> {
-        let AssignPayload {
-            idx_direct,
-            idx_oblivious,
-            macs,
-        } = payload;
+impl ObliviousTransfer<'_> {
+    /// Returns the ranges for which oblivious transfer is being performed.
+    pub fn idx(&self) -> &RangeSet {
+        &self.idx
+    }
 
-        if self.idx_direct != idx_direct {
-            todo!()
-        } else if self.idx_oblivious != idx_oblivious {
-            todo!()
+    /// Returns the choices for oblivious transfer.
+    pub fn choices(&self) -> Vec<bool> {
+        let mut choices: Vec<_> = Vec::with_capacity(self.idx.len());
+        for range in self.idx.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+            choices.extend(
+                self.store
+                    .data_store
+                    .try_get(slice)
+                    .expect("data should be set")
+                    .iter()
+                    .by_vals(),
+            );
         }
 
-        if oblivious_macs.len() != idx_oblivious.len() {
+        choices
+    }
+
+    /// Receives the MACs from the oblivious transfer.
+    pub fn receive(self, macs: Vec<Mac>) -> Result<()> {
+        if macs.len() != self.idx.len() {
             todo!()
         }
 
         let mut i = 0;
-        for range in idx_direct.iter_ranges() {
+        for range in self.idx.iter_ranges() {
             let slice = Slice::from_range_unchecked(range);
             self.store
                 .mac_store
-                .try_set(slice, &macs[i..i + slice.size()])?;
-            i += slice.size();
+                .try_set(slice, &macs[i..i + slice.len()])?;
+            i += slice.len();
         }
 
-        i = 0;
-        for range in idx_oblivious.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-            self.store
-                .mac_store
-                .try_set(slice, &oblivious_macs[i..i + slice.size()])?;
-            i += slice.size();
-        }
+        self.store.idx_pending_commit = self.store.idx_pending_commit.difference(&self.idx);
 
         Ok(())
     }

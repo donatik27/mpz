@@ -1,4 +1,4 @@
-//pub mod binary;
+pub mod binary;
 pub mod correlated;
 pub mod store;
 pub mod view;
@@ -43,34 +43,32 @@ impl fmt::Display for Ptr {
     }
 }
 
-/// Value that can be converted to a raw value.
+pub trait MemoryType {
+    /// Raw memory type.
+    type Raw;
+}
+
 pub trait ToRaw {
-    /// Returns `self` as a raw value.
+    /// Returns the underlying raw memory slice.
     fn to_raw(&self) -> Slice;
 }
 
-/// Size of a value in memory.
-pub trait Size {
-    /// Returns the size of the value in memory.
-    fn size(&self) -> usize;
+pub trait FromRaw {
+    /// Creates a new value from a raw memory slice.
+    fn from_raw(slice: Slice) -> Self;
 }
 
-/// Statically sized type.
-pub trait StaticSize {
-    /// Byte size of the type.
+pub trait Repr<T: MemoryType>: FromRaw + ToRaw {
     const SIZE: usize;
+    type Clear: ClearValue<T>;
 }
 
-impl<T: StaticSize> Size for T {
-    fn size(&self) -> usize {
-        T::SIZE
-    }
-}
+pub trait ClearValue<T: MemoryType> {
+    /// Converts `self` into a raw clear value.
+    fn into_clear(self) -> T::Raw;
 
-/// Type with a clear representation.
-pub trait ClearRepr {
-    /// Type of the representation.
-    type Repr;
+    /// Converts a raw clear value into `Self`.
+    fn from_clear(value: T::Raw) -> Self;
 }
 
 /// A slice of contiguous memory.
@@ -83,7 +81,8 @@ pub struct Slice {
 impl Slice {
     /// Creates a new slice.
     ///
-    /// Do not use this unless you know what you're doing. It will cause bugs and break security.
+    /// Do not use this unless you know what you're doing. It will cause bugs
+    /// and break security.
     #[inline]
     pub fn new_unchecked(ptr: Ptr, size: usize) -> Self {
         Self { ptr, size }
@@ -91,7 +90,8 @@ impl Slice {
 
     /// Creates a new slice from a range.
     ///
-    /// Do not use this unless you know what you're doing. It will cause bugs and break security.
+    /// Do not use this unless you know what you're doing. It will cause bugs
+    /// and break security.
     #[inline]
     pub fn from_range_unchecked(range: Range) -> Self {
         Self {
@@ -100,13 +100,18 @@ impl Slice {
         }
     }
 
-    /// Returns the pointer to the value.
+    /// Returns a pointer to the start of slice.
     #[inline]
     pub fn ptr(&self) -> Ptr {
         self.ptr
     }
 
-    /// Returns the memory range of the value.
+    /// Returns the length of the slice.
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    /// Returns the memory range of the slice.
     #[inline]
     pub fn to_range(&self) -> Range {
         self.ptr.as_usize()..self.ptr.as_usize() + self.size
@@ -132,13 +137,6 @@ impl fmt::Display for Slice {
 impl From<Slice> for Range {
     fn from(slice: Slice) -> Self {
         slice.to_range()
-    }
-}
-
-impl Size for Slice {
-    #[inline]
-    fn size(&self) -> usize {
-        self.size
     }
 }
 
@@ -187,16 +185,33 @@ impl IndexMut<Slice> for BitVec {
 /// An array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Array<T, const N: usize> {
-    ptr: Ptr,
+    slice: Slice,
     _pd: PhantomData<T>,
 }
 
-impl<T: StaticSize, const N: usize> StaticSize for Array<T, N> {
-    const SIZE: usize = T::SIZE * N as usize;
+impl<T, const N: usize> FromRaw for Array<T, N> {
+    fn from_raw(slice: Slice) -> Self {
+        Self {
+            slice,
+            _pd: PhantomData,
+        }
+    }
 }
 
-impl<T: ClearRepr, const N: usize> ClearRepr for Array<T, N> {
-    type Repr = [T::Repr; N];
+impl<T, const N: usize> ToRaw for Array<T, N> {
+    fn to_raw(&self) -> Slice {
+        self.slice
+    }
+}
+
+impl<T, R, const N: usize> Repr<R> for Array<T, N>
+where
+    T: Repr<R>,
+    R: MemoryType,
+    [T::Clear; N]: ClearValue<R>,
+{
+    const SIZE: usize = T::SIZE * N;
+    type Clear = [T::Clear; N];
 }
 
 /// A vector.
@@ -205,8 +220,4 @@ pub struct Vector<T> {
     ptr: Ptr,
     len: usize,
     _pd: PhantomData<T>,
-}
-
-impl<T: ClearRepr> ClearRepr for Vector<T> {
-    type Repr = Vec<T::Repr>;
 }

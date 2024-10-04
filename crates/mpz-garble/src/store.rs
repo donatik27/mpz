@@ -36,15 +36,23 @@ mod tests {
                 let ref_b = store.alloc(128);
                 let ref_c = store.alloc(128);
 
-                store.assign_public(ref_a, &val_a).unwrap();
-                store.assign_private(ref_b, &val_b).unwrap();
-                store.assign_blind(ref_c).unwrap();
+                store.configure_public(ref_a).unwrap();
+                store.configure_private(ref_b).unwrap();
+                store.configure_blind(ref_c).unwrap();
+
+                store.assign(ref_a, &val_a).unwrap();
+                store.assign(ref_b, &val_b).unwrap();
+
+                store.commit(ref_a).unwrap();
+                store.commit(ref_b).unwrap();
+                store.commit(ref_c).unwrap();
 
                 let val_a = store.decode(ref_a).unwrap();
                 let val_b = store.decode(ref_b).unwrap();
                 let val_c = store.decode(ref_c).unwrap();
 
-                store.commit(&mut ctx_a, &mut cot_sender).await.unwrap();
+                store.sync(&mut ctx_a, &mut cot_sender).await.unwrap();
+                store.sync(&mut ctx_a, &mut cot_sender).await.unwrap();
 
                 futures::try_join!(val_a, val_b, val_c).unwrap()
             },
@@ -55,15 +63,23 @@ mod tests {
                 let ref_b = store.alloc(128);
                 let ref_c = store.alloc(128);
 
-                store.assign_public(ref_a, &val_a).unwrap();
-                store.assign_blind(ref_b).unwrap();
-                store.assign_private(ref_c, &val_c).unwrap();
+                store.configure_public(ref_a).unwrap();
+                store.configure_blind(ref_b).unwrap();
+                store.configure_private(ref_c).unwrap();
+
+                store.assign(ref_a, &val_a).unwrap();
+                store.assign(ref_c, &val_c).unwrap();
+
+                store.commit(ref_a).unwrap();
+                store.commit(ref_b).unwrap();
+                store.commit(ref_c).unwrap();
 
                 let val_a = store.decode(ref_a).unwrap();
                 let val_b = store.decode(ref_b).unwrap();
                 let val_c = store.decode(ref_c).unwrap();
 
-                store.commit(&mut ctx_b, &mut cot_receiver).await.unwrap();
+                store.sync(&mut ctx_b, &mut cot_receiver).await.unwrap();
+                store.sync(&mut ctx_b, &mut cot_receiver).await.unwrap();
 
                 futures::try_join!(val_a, val_b, val_c).unwrap()
             }

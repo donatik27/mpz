@@ -5,11 +5,11 @@ use mpz_circuits::Circuit;
 use mpz_common::{scoped, Context};
 use mpz_core::{bitvec::BitVec, Block};
 use mpz_garble_core::GeneratorOutput;
-use mpz_memory_core::{correlated::Delta, Slice};
+use mpz_memory_core::{binary::Binary, correlated::Delta, MemoryType, Slice};
 use mpz_ot::COTSender;
 use mpz_vm::{
-    Alloc, AssignBlind, AssignPrivate, AssignPublic, Callable, Commit, Decode, Execute, Preprocess,
-    Result, Synchronize, VmError,
+    Alloc, Assign, Callable, Commit, Decode, Execute, Memory, MemorySync, Preprocess, Result,
+    Synchronize, View, VmError,
 };
 use mpz_vm_core::{Call, DecodeFuture};
 use rand::Rng;
@@ -36,40 +36,44 @@ impl<OT> Generator<OT> {
     }
 }
 
+impl<OT> Memory for Generator<OT> {
+    type MemoryType = Binary;
+}
+
 impl<OT> Alloc for Generator<OT> {
     fn alloc_raw(&mut self, size: usize) -> Result<Slice> {
         Ok(self.store.alloc(size))
     }
 }
 
-impl<OT> AssignPublic for Generator<OT> {
-    type Value = BitVec;
+impl<OT> View for Generator<OT> {
+    fn configure_public_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.configure_public(slice).map_err(VmError::memory)
+    }
 
-    fn assign_public_raw(&mut self, slice: Slice, value: Self::Value) -> Result<()> {
-        self.store
-            .assign_public(slice, &value)
-            .map_err(VmError::memory)
+    fn configure_private_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.configure_private(slice).map_err(VmError::memory)
+    }
+
+    fn configure_blind_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.configure_blind(slice).map_err(VmError::memory)
     }
 }
 
-impl<OT> AssignPrivate for Generator<OT> {
-    type Value = BitVec;
-
-    fn assign_private_raw(&mut self, slice: Slice, value: Self::Value) -> Result<()> {
-        self.store
-            .assign_private(slice, &value)
-            .map_err(VmError::memory)
+impl<OT> Assign for Generator<OT> {
+    fn assign_raw(&mut self, slice: Slice, value: BitVec) -> Result<()> {
+        self.store.assign(slice, &value).map_err(VmError::memory)
     }
 }
 
-impl<OT> AssignBlind for Generator<OT> {
-    fn assign_blind_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.assign_blind(slice).map_err(VmError::memory)
+impl<OT> Commit for Generator<OT> {
+    fn commit_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.commit(slice).map_err(VmError::memory)
     }
 }
 
 impl<OT> Callable for Generator<OT> {
-    fn call_raw(&mut self, call: Call) -> Result<Slice> {
+    fn call(&mut self, call: Call) -> Result<Slice> {
         let output = self.store.alloc_output(call.circ().output_len());
         self.call_stack.push((call, output));
         Ok(output)
@@ -77,22 +81,20 @@ impl<OT> Callable for Generator<OT> {
 }
 
 impl<OT> Decode for Generator<OT> {
-    type Value = BitVec;
-
-    fn decode_raw(&mut self, raw: Slice) -> Result<DecodeFuture<Self::Value>> {
+    fn decode_raw(&mut self, raw: Slice) -> Result<DecodeFuture<BitVec>> {
         self.store.decode(raw).map_err(VmError::memory)
     }
 }
 
 #[async_trait]
-impl<Ctx, OT> Commit<Ctx> for Generator<OT>
+impl<Ctx, OT> MemorySync<Ctx> for Generator<OT>
 where
     Ctx: Context,
     OT: COTSender<Ctx, Block> + Send,
 {
-    async fn commit(&mut self, ctx: &mut Ctx) -> Result<()> {
+    async fn sync_memory(&mut self, ctx: &mut Ctx) -> Result<()> {
         self.store
-            .commit(ctx, &mut self.ot)
+            .sync(ctx, &mut self.ot)
             .await
             .map_err(VmError::memory)
     }
@@ -219,9 +221,9 @@ where
     OT: COTSender<Ctx, Block> + Send,
 {
     async fn sync(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.commit(ctx).await?;
+        self.sync_memory(ctx).await?;
         self.execute(ctx).await?;
-        self.commit(ctx).await?;
+        self.sync_memory(ctx).await?;
 
         Ok(())
     }

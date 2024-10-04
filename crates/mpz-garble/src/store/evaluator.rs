@@ -5,7 +5,9 @@ use mpz_core::{
     bitvec::{BitSlice, BitVec},
     Block,
 };
-use mpz_garble_core::store::{EvaluatorStore as Core, EvaluatorStoreError as CoreError};
+use mpz_garble_core::store::{
+    EvaluatorStore as Core, EvaluatorStoreError as CoreError, EvaluatorSync, GeneratorSync,
+};
 use mpz_memory_core::{correlated::Mac, Slice};
 use mpz_ot::{COTReceiver, COTReceiverOutput};
 use mpz_vm_core::DecodeFuture;
@@ -42,59 +44,88 @@ impl EvaluatorStore {
         self.inner.try_set_macs(slice, macs).map_err(Error::from)
     }
 
-    pub fn assign_public(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.inner.assign_public(slice, data).map_err(Error::from)
+    /// Sets the slice as public.
+    pub fn configure_public(&mut self, slice: Slice) -> Result<()> {
+        self.inner.configure_public(slice).map_err(Error::from)
     }
 
-    pub fn assign_private(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.inner.assign_private(slice, data).map_err(Error::from)
+    /// Sets the slice as private.
+    pub fn configure_private(&mut self, slice: Slice) -> Result<()> {
+        self.inner.configure_private(slice).map_err(Error::from)
     }
 
-    pub fn assign_blind(&mut self, slice: Slice) -> Result<()> {
-        self.inner.assign_blind(slice).map_err(Error::from)
+    /// Sets the slice as blind.
+    pub fn configure_blind(&mut self, slice: Slice) -> Result<()> {
+        self.inner.configure_blind(slice).map_err(Error::from)
+    }
+
+    pub fn assign(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
+        self.inner.assign(slice, data).map_err(Error::from)
+    }
+
+    pub fn commit(&mut self, slice: Slice) -> Result<()> {
+        self.inner.commit(slice).map_err(Error::from)
     }
 
     pub fn decode(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
         self.inner.decode(slice).map_err(Error::from)
     }
 
-    pub async fn commit<Ctx, OT>(&mut self, ctx: &mut Ctx, ot: &mut OT) -> Result<()>
+    pub async fn sync<Ctx, OT>(&mut self, ctx: &mut Ctx, ot: &mut OT) -> Result<()>
     where
         Ctx: Context,
         OT: COTReceiver<Ctx, bool, Block> + Send,
     {
-        if self.inner.wants_assign() {
-            let (receive, ot_choices) = self.inner.execute_assign()?;
+        let mut msg = EvaluatorSync::default();
 
-            if !ot_choices.is_empty() {
-                let (payload, COTReceiverOutput { msgs: macs, .. }) = ctx
-                    .try_join(
-                        scoped!(move |ctx| {
-                            ctx.io_mut().expect_next().await.map_err(Error::from)
-                        }),
-                        scoped!(move |ctx| {
-                            ot.receive_correlated(ctx, &ot_choices)
-                                .await
-                                .map_err(Error::from)
-                        }),
-                    )
-                    .await??;
-
-                receive.receive(payload, Mac::from_blocks(macs))?;
-            } else {
-                let payload = ctx.io_mut().expect_next().await?;
-                receive.receive(payload, Vec::default())?;
-            }
+        if self.inner.wants_prove_macs() {
+            msg.macs = Some(self.inner.prove_macs()?);
         }
 
-        if self.inner.wants_key_bits() {
-            let key_bits = ctx.io_mut().expect_next().await?;
-            self.inner.receive_key_bits(key_bits)?;
+        let receive = if self.inner.wants_oblivious_transfer() {
+            let receive = self.inner.oblivious_transfer()?;
+            msg.idx_ot = Some(receive.idx().clone());
+            Some(receive)
+        } else {
+            None
+        };
+
+        let expected_idx_ot = receive.as_ref().map(|r| r.idx()).cloned();
+
+        let (msg, _) = ctx
+            .try_join(
+                scoped!(move |ctx| {
+                    let msg: GeneratorSync = ctx.io_mut().expect_next().await?;
+
+                    if msg.idx_ot != expected_idx_ot {
+                        assert_eq!(msg.idx_ot, expected_idx_ot);
+                    }
+
+                    Ok::<_, Error>(msg)
+                }),
+                scoped!(move |ctx| {
+                    ctx.io_mut().send(msg).await?;
+
+                    if let Some(receive) = receive {
+                        let choices = receive.choices();
+                        let COTReceiverOutput { msgs: macs, .. } =
+                            ot.receive_correlated(ctx, &choices).await?;
+                        receive.receive(Mac::from_blocks(macs))?;
+                    }
+
+                    Ok(())
+                }),
+            )
+            .await??;
+
+        let GeneratorSync { macs, key_bits, .. } = msg;
+
+        if let Some(payload) = macs {
+            self.inner.receive_macs(payload)?;
         }
 
-        if self.inner.wants_decode() {
-            let payload = self.inner.send_macs()?;
-            ctx.io_mut().send(payload).await?;
+        if let Some(payload) = key_bits {
+            self.inner.receive_key_bits(payload)?;
         }
 
         Ok(())

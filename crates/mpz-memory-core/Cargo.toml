@@ -13,6 +13,7 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+itybity = { workspace = true }
 
 [dev-dependencies]
 mpz-ot-core = { workspace = true }

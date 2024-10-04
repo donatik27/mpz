@@ -7,16 +7,17 @@ use mpz_core::{
 use mpz_memory_core::{
     correlated::{Delta, Key, KeyStore, KeyStoreError},
     store::{BitStore, StoreError},
-    AssignKind, Size, Slice,
+    view::View,
+    AssignKind, Slice,
 };
 use mpz_vm_core::{AssignOp, DecodeFuture, DecodeOp};
 use rand::Rng;
 use utils::{
     filter_drain::FilterDrain,
-    range::{Difference, Intersection, Subset, Union},
+    range::{Difference, Disjoint, Intersection, Subset, Union},
 };
 
-use crate::store::{AssignPayload, DecodePayload, MacPayload};
+use crate::store::{KeyBitPayload, MacPayload, MacProof, OTKeyPayload};
 
 type Error = GeneratorStoreError;
 type Result<T> = core::result::Result<T, Error>;
@@ -27,9 +28,14 @@ pub struct GeneratorStore {
     prg: Prg,
     key_store: KeyStore,
     data_store: BitStore,
+    view: View,
 
     /// Ranges which are computed outputs.
     idx_outputs: RangeSet,
+    /// Ranges for which commitment is pending.
+    idx_pending_commit: RangeSet,
+    /// Ranges which have been committed.
+    idx_committed: RangeSet,
     /// Ranges for which key bits have been sent.
     idx_key_bits: RangeSet,
     /// Ranges for which key bits are pending.
@@ -39,7 +45,6 @@ pub struct GeneratorStore {
     /// Ranges for which we are waiting for MACs to decode.
     idx_pending_decode: RangeSet,
 
-    buffer_assign: Vec<AssignOp>,
     buffer_decode: Vec<DecodeOp<BitVec>>,
 }
 
@@ -50,12 +55,14 @@ impl GeneratorStore {
             prg: Prg::new_with_seed(seed),
             key_store: KeyStore::new(delta),
             data_store: BitStore::new(),
+            view: View::default(),
             idx_outputs: RangeSet::default(),
+            idx_pending_commit: RangeSet::default(),
+            idx_committed: RangeSet::default(),
             idx_key_bits: RangeSet::default(),
             idx_pending_key_bits: RangeSet::default(),
             idx_decoded: RangeSet::default(),
             idx_pending_decode: RangeSet::default(),
-            buffer_assign: Vec::new(),
             buffer_decode: Vec::new(),
         }
     }
@@ -80,12 +87,20 @@ impl GeneratorStore {
         self.data_store.is_set(slice)
     }
 
-    /// Returns whether the store wants to assign values.
-    pub fn wants_assign(&self) -> bool {
-        !self.buffer_assign.is_empty()
+    /// Returns `true` if the store wants to commit.
+    pub fn wants_commit(&self) -> bool {
+        !self.idx_pending_commit.is_empty()
     }
 
-    /// Returns whether the store wants to send key bits.
+    /// Returns `true` if the store wants to send MACs via oblivious transfer.
+    pub fn wants_oblivious_transfer(&self) -> bool {
+        !self
+            .idx_pending_commit
+            .intersection(self.view.blind())
+            .is_empty()
+    }
+
+    /// Returns `true` if the store wants to send key bits.
     pub fn wants_send_key_bits(&self) -> bool {
         !self
             .idx_pending_key_bits
@@ -93,7 +108,7 @@ impl GeneratorStore {
             .is_empty()
     }
 
-    /// Returns whether the store wants to verify data.
+    /// Returns `true` if the store wants to verify data.
     pub fn wants_verify_data(&self) -> bool {
         !self.idx_pending_decode.is_empty()
     }
@@ -105,12 +120,14 @@ impl GeneratorStore {
     /// Allocates memory for a value.
     pub fn alloc(&mut self, len: usize) -> Slice {
         let keys = (0..len).map(|_| self.prg.gen()).collect::<Vec<_>>();
+        self.view.alloc(len);
         self.key_store.alloc_with(&keys);
         self.data_store.alloc(len)
     }
 
     /// Allocates uninitialized memory for output values.
     pub fn alloc_output(&mut self, len: usize) -> Slice {
+        self.view.alloc(len);
         self.key_store.alloc(len);
         let slice = self.data_store.alloc(len);
         self.idx_outputs = self.idx_outputs.union(&slice.to_range());
@@ -122,36 +139,58 @@ impl GeneratorStore {
         self.key_store.try_set(slice, keys).map_err(Error::from)
     }
 
-    /// Assigns public data.
-    pub fn assign_public(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.data_store.try_set(slice, data)?;
+    /// Configures the slice as public.
+    pub fn configure_public(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            todo!("view is already set");
+        }
 
-        self.buffer_assign.push(AssignOp {
-            slice,
-            kind: AssignKind::Public,
-        });
-
-        Ok(())
-    }
-
-    /// Assigns private data.
-    pub fn assign_private(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.data_store.try_set(slice, data)?;
-
-        self.buffer_assign.push(AssignOp {
-            slice,
-            kind: AssignKind::Private,
-        });
+        self.view.set_public(slice);
 
         Ok(())
     }
 
-    /// Assigns blind data.
-    pub fn assign_blind(&mut self, slice: Slice) -> Result<()> {
-        self.buffer_assign.push(AssignOp {
-            slice,
-            kind: AssignKind::Blind,
-        });
+    /// Configures the slice as private.
+    pub fn configure_private(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            todo!("view is already set");
+        }
+
+        self.view.set_private(slice);
+
+        Ok(())
+    }
+
+    /// Configures the slice as blind.
+    pub fn configure_blind(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            todo!("view is already set");
+        }
+
+        self.view.set_blind(slice);
+
+        Ok(())
+    }
+
+    /// Assigns data to memory.
+    pub fn assign(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
+        if !self.view.is_visible(slice) {
+            todo!("memory not configured as visible");
+        }
+
+        self.data_store.try_set(slice, data)?;
+
+        Ok(())
+    }
+
+    /// Commits the slice.
+    pub fn commit(&mut self, slice: Slice) -> Result<()> {
+        let range = slice.to_range();
+        if !range.is_disjoint(&self.idx_committed) {
+            todo!("slice already committed");
+        }
+
+        self.idx_pending_commit = range.union(&self.idx_pending_commit);
 
         Ok(())
     }
@@ -186,53 +225,43 @@ impl GeneratorStore {
         Ok(fut)
     }
 
-    /// Executes assignment operations.
-    ///
-    /// Returns the payload to send to the evaluator as well as the keys to send
-    /// using oblivious transfer.
-    pub fn execute_assign(&mut self) -> Result<(AssignPayload, Vec<Key>)> {
-        self.buffer_assign.sort_by_key(|op| op.slice.ptr());
+    /// Sends pending MACs to the evaluator.
+    pub fn send_macs(&mut self) -> Result<MacPayload> {
+        let idx = self.idx_pending_commit.intersection(self.view.visible());
 
-        let mut idx_direct = Vec::new();
-        let mut idx_oblivious = Vec::new();
-        for op in mem::take(&mut self.buffer_assign) {
-            match op.kind {
-                AssignKind::Public | AssignKind::Private => {
-                    idx_direct.push(op.slice.to_range());
-                }
-                AssignKind::Blind => {
-                    idx_oblivious.push(op.slice.to_range());
-                }
-            }
-        }
-
-        let idx_direct = RangeSet::from(idx_direct);
-        let idx_oblivious = RangeSet::from(idx_oblivious);
-
-        let mut keys = Vec::new();
-        for range in idx_oblivious.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-            keys.extend_from_slice(self.key_store.oblivious_transfer(slice)?);
-        }
-
-        let mut macs = Vec::new();
-        for range in idx_direct.iter_ranges() {
+        let mut macs = Vec::with_capacity(idx.len());
+        for range in idx.iter_ranges() {
             let slice = Slice::from_range_unchecked(range);
             let data = self.data_store.try_get(slice).expect("data should be set");
             macs.extend(self.key_store.authenticate(slice, data)?);
         }
 
-        Ok((
-            AssignPayload {
-                idx_direct,
-                idx_oblivious,
-                macs,
-            },
-            keys,
-        ))
+        self.idx_pending_commit = self.idx_pending_commit.difference(&idx);
+
+        Ok(MacPayload { idx, macs })
     }
 
-    pub fn send_key_bits(&mut self) -> Result<DecodePayload> {
+    /// Sends pending MACs to the evaluator using oblivious transfer.
+    pub fn oblivious_transfer(&mut self) -> Result<OTKeyPayload> {
+        let idx = self.idx_pending_commit.intersection(self.view.blind());
+
+        let mut keys = Vec::with_capacity(idx.len());
+        for range in idx.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+
+            // Store protects against keys being transferred multiple times.
+            let keys_ = self.key_store.oblivious_transfer(slice)?;
+
+            keys.extend_from_slice(keys_);
+        }
+
+        self.idx_pending_commit = self.idx_pending_commit.difference(&idx);
+
+        Ok(OTKeyPayload { idx, keys })
+    }
+
+    /// Sends pending key bits to the evaluator.
+    pub fn send_key_bits(&mut self) -> Result<KeyBitPayload> {
         let idx = mem::take(&mut self.idx_pending_key_bits);
 
         let mut key_bits = BitVec::new();
@@ -241,14 +270,14 @@ impl GeneratorStore {
             key_bits.extend(self.key_store.try_get_bits(slice)?);
         }
 
-        Ok(DecodePayload { idx, key_bits })
+        Ok(KeyBitPayload { idx, key_bits })
     }
 
     /// Verifies a proof of MACs from the evaluator.
     ///
     /// Resolves corresponding decode operations.
-    pub fn verify_macs(&mut self, payload: MacPayload) -> Result<()> {
-        let MacPayload {
+    pub fn verify_macs(&mut self, payload: MacProof) -> Result<()> {
+        let MacProof {
             idx,
             mut bits,
             proof,
@@ -263,8 +292,8 @@ impl GeneratorStore {
         let mut i = 0;
         for range in idx.iter_ranges() {
             let slice = Slice::from_range_unchecked(range);
-            self.data_store.try_set(slice, &bits[i..i + slice.size()])?;
-            i += slice.size();
+            self.data_store.try_set(slice, &bits[i..i + slice.len()])?;
+            i += slice.len();
         }
 
         self.idx_pending_decode = self.idx_pending_decode.difference(&idx);
