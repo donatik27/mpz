@@ -78,19 +78,20 @@ mod tests {
         assert_eq!(gen_out, ev_out);
     }
 
-    // #[tokio::test]
-    // async fn test_semihonest_nothing_to_do() {
-    //     let mut rng = StdRng::seed_from_u64(0);
-    //     let delta = Delta::random(&mut rng);
+    #[tokio::test]
+    async fn test_semihonest_nothing_to_do() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let delta = Delta::random(&mut rng);
 
-    //     let (mut ctx_a, mut ctx_b) = test_st_executor(8);
-    //     let (cot_send, cot_recv) = ideal_cot_with_delta(delta.into_inner());
+        let (mut ctx_a, mut ctx_b) = test_st_executor(8);
+        let (cot_send, cot_recv) = ideal_cot_with_delta(delta.into_inner());
 
-    //     let mut gen = Generator::new(cot_send, [0u8; 16], delta);
-    //     let mut ev = Evaluator::new(cot_recv);
+        let mut gen = Generator::new(cot_send, [0u8; 16], delta);
+        let mut ev = Evaluator::new(cot_recv);
 
-    //     futures::try_join!(gen.sync_memory(&mut ctx_a), ev.sync_memory(&mut
-    // ctx_b)).unwrap(); }
+        gen.flush(&mut ctx_a).await.unwrap();
+        ev.flush(&mut ctx_b).await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_semihonest_preprocess() {

@@ -159,11 +159,10 @@ where
                     ready_calls,
                     Some(|(call, _): &(Call, _)| call.circ().and_count()),
                 )
-                .await
-                .unwrap();
+                .await?;
 
             for (call, output, result) in outputs {
-                let garbled_circuit = result.unwrap();
+                let garbled_circuit = result?;
                 self.preprocessed.insert(output, (call, garbled_circuit));
                 self.store.mark_output(output);
             }
@@ -200,7 +199,7 @@ where
 
             let outputs = CpuBackend::blocking(|| evaluate_garbled_circuits(ready_calls))
                 .await
-                .unwrap();
+                .map_err(|e| ErrorRepr::Evaluator(e.into()))?;
 
             for (output_ref, output) in output_refs.into_iter().zip(outputs) {
                 self.store.set_output(output_ref, &output.outputs)?;
@@ -245,14 +244,11 @@ where
                     ready_calls,
                     Some(|(circ, _, _): &(Arc<Circuit>, _, _)| circ.and_count()),
                 )
-                .await
-                .unwrap();
+                .await?;
 
             for (output_ref, result) in outputs {
-                let output = result.unwrap();
-                self.store
-                    .set_output(output_ref, &output.outputs)
-                    .map_err(Error::from)?;
+                let output = result?;
+                self.store.set_output(output_ref, &output.outputs)?;
             }
 
             self.store.flush_decode()?;
@@ -263,29 +259,49 @@ where
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("evaluator error")]
-pub struct EvaluatorError {}
+#[error(transparent)]
+pub struct EvaluatorError(#[from] ErrorRepr);
+
+#[derive(Debug, thiserror::Error)]
+enum ErrorRepr {
+    #[error(transparent)]
+    Store(#[from] EvaluatorStoreError),
+    #[error(transparent)]
+    Evaluator(#[from] crate::evaluator::EvaluatorError),
+    #[error(transparent)]
+    Ot(#[from] mpz_ot::OTError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Context(#[from] mpz_common::ContextError),
+}
 
 impl From<EvaluatorStoreError> for EvaluatorError {
     fn from(value: EvaluatorStoreError) -> Self {
-        todo!()
+        EvaluatorError(ErrorRepr::Store(value))
     }
 }
 
 impl From<mpz_ot::OTError> for EvaluatorError {
     fn from(value: mpz_ot::OTError) -> Self {
-        todo!()
+        EvaluatorError(ErrorRepr::Ot(value))
     }
 }
 
 impl From<std::io::Error> for EvaluatorError {
     fn from(value: std::io::Error) -> Self {
-        todo!()
+        EvaluatorError(ErrorRepr::Io(value))
     }
 }
 
 impl From<mpz_common::ContextError> for EvaluatorError {
     fn from(value: mpz_common::ContextError) -> Self {
-        todo!()
+        EvaluatorError(ErrorRepr::Context(value))
+    }
+}
+
+impl From<crate::evaluator::EvaluatorError> for EvaluatorError {
+    fn from(value: crate::evaluator::EvaluatorError) -> Self {
+        EvaluatorError(ErrorRepr::Evaluator(value))
     }
 }

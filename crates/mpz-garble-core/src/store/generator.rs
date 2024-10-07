@@ -253,7 +253,7 @@ impl Memory<Binary> for GeneratorStore {
         if !self.view.is_visible(slice) {
             return Err(ErrorRepr::AssignedBlind { slice }.into());
         } else if !slice.to_range().is_disjoint(&self.output_state.all) {
-            todo!("can not assign to output");
+            return Err(ErrorRepr::AssignedOutput { slice }.into());
         }
 
         self.data_store.try_set(slice, &data)?;
@@ -266,7 +266,7 @@ impl Memory<Binary> for GeneratorStore {
         if !self.view.is_set(slice) {
             return Err(ErrorRepr::VisibilityNotSet { slice }.into());
         } else if !slice.to_range().is_disjoint(&self.output_state.all) {
-            todo!("can not commit output");
+            return Err(ErrorRepr::CommitOutput { slice }.into());
         }
 
         let range = slice.to_range();
@@ -309,7 +309,7 @@ impl ViewTrait for GeneratorStore {
         if self.view.is_set_any(slice) {
             return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
         } else if !slice.to_range().is_disjoint(&self.output_state.all) {
-            todo!("can not set output visibility");
+            return Err(ErrorRepr::VisibilityOutput { slice }.into());
         }
 
         self.view.set_public(slice);
@@ -321,7 +321,7 @@ impl ViewTrait for GeneratorStore {
         if self.view.is_set_any(slice) {
             return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
         } else if !slice.to_range().is_disjoint(&self.output_state.all) {
-            todo!("can not set output visibility");
+            return Err(ErrorRepr::VisibilityOutput { slice }.into());
         }
 
         self.view.set_private(slice);
@@ -333,7 +333,7 @@ impl ViewTrait for GeneratorStore {
         if self.view.is_set_any(slice) {
             return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
         } else if !slice.to_range().is_disjoint(&self.output_state.all) {
-            todo!("can not set output visibility");
+            return Err(ErrorRepr::VisibilityOutput { slice }.into());
         }
 
         self.view.set_blind(slice);
@@ -359,12 +359,16 @@ enum ErrorRepr {
     VisibilityNotSet { slice: Slice },
     #[error("visibility already set for slice: {slice}")]
     VisibilityAlreadySet { slice: Slice },
+    #[error("attempted to set visibility for output: {slice}")]
+    VisibilityOutput { slice: Slice },
     #[error("attempted to commit visible memory which is not assigned: {slice}")]
     NotAssigned { slice: Slice },
     #[error("attempted to assign to blind memory: {slice}")]
     AssignedBlind { slice: Slice },
-    #[error("attempted to mark slice ready which was not pending: {slice}")]
-    NotPending { slice: Slice },
+    #[error("attempted to assign to an output: {slice}")]
+    AssignedOutput { slice: Slice },
+    #[error("attempted to commit output, only inputs can be committed: {slice}")]
+    CommitOutput { slice: Slice },
     #[error("evaluator flush index mismatch: expected {expected:?}, got {actual:?}")]
     FlushIdx {
         expected: FlushState,

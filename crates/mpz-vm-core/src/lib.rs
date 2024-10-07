@@ -5,7 +5,7 @@ pub use mpz_memory_core as memory;
 
 pub mod prelude {
     pub use crate::{Execute, VmExt};
-    pub use mpz_memory_core::{Array, MemoryExt, Slice};
+    pub use mpz_memory_core::{Array, MemoryExt, Slice, ViewExt};
 }
 
 use async_trait::async_trait;

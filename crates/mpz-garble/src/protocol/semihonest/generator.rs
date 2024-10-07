@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 
 use async_trait::async_trait;
 use mpz_circuits::Circuit;
@@ -24,6 +24,7 @@ pub struct Generator<OT> {
     ot: OT,
     store: GeneratorStore,
     call_stack: Vec<(Call, Slice)>,
+    preprocessed_outputs: Vec<Slice>,
 }
 
 impl<OT> Generator<OT> {
@@ -33,6 +34,7 @@ impl<OT> Generator<OT> {
             ot,
             store: GeneratorStore::new(seed, delta),
             call_stack: Vec::new(),
+            preprocessed_outputs: Vec::new(),
         }
     }
 
@@ -178,6 +180,7 @@ where
             for (output_ref, output) in outputs {
                 let output = output?;
                 self.store.set_output(output_ref, &output.outputs)?;
+                self.preprocessed_outputs.push(output_ref);
             }
         }
 
@@ -211,6 +214,10 @@ where
                 self.store.mark_output(output_ref);
             }
         }
+
+        mem::take(&mut self.preprocessed_outputs)
+            .into_iter()
+            .for_each(|output| self.store.mark_output(output));
 
         Ok(())
     }

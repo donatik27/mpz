@@ -48,7 +48,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         let inputs: Vec<_> = inputs
             .iter()
             .zip(choices)
-            .map(|(input, choice)| if choice { input ^ delta } else { *input })
+            .map(|(input, choice)| input.auth(choice, &delta))
             .collect();
 
         let mut ev = Evaluator::default();
