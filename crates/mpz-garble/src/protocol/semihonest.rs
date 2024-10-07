@@ -8,7 +8,7 @@ pub use generator::Generator;
 mod tests {
     use mpz_circuits::circuits::AES128;
     use mpz_common::executor::test_st_executor;
-    use mpz_memory_core::{binary::U8, correlated::Delta, Array, MemoryExt};
+    use mpz_memory_core::{binary::U8, correlated::Delta, Array, MemoryExt, ViewExt};
     use mpz_ot::ideal::cot::ideal_cot_with_delta;
     use mpz_vm_core::{Call, Execute, VmExt};
     use rand::{rngs::StdRng, SeedableRng};

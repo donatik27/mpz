@@ -10,7 +10,7 @@ use mpz_garble_core::{
     store::{EvaluatorStore, EvaluatorStoreError},
     GarbledCircuit, Mac,
 };
-use mpz_memory_core::{binary::Binary, DecodeFuture, Memory, Slice};
+use mpz_memory_core::{binary::Binary, DecodeFuture, Memory, Slice, View};
 use mpz_ot::COTReceiver;
 use mpz_vm_core::{Call, Execute, Vm};
 use serio::{stream::IoStreamExt, SinkExt};
@@ -45,22 +45,10 @@ impl<OT> Evaluator<OT> {
 }
 
 impl<OT> Memory<Binary> for Evaluator<OT> {
-    type Error = EvaluatorError;
+    type Error = Error;
 
     fn alloc_raw(&mut self, size: usize) -> Result<Slice> {
         self.store.alloc_raw(size).map_err(Error::from)
-    }
-
-    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_public_raw(slice).map_err(Error::from)
-    }
-
-    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_private_raw(slice).map_err(Error::from)
-    }
-
-    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_blind_raw(slice).map_err(Error::from)
     }
 
     fn commit_raw(&mut self, slice: Slice) -> Result<()> {
@@ -73,6 +61,22 @@ impl<OT> Memory<Binary> for Evaluator<OT> {
 
     fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
         self.store.decode_raw(slice).map_err(Error::from)
+    }
+}
+
+impl<OT> View for Evaluator<OT> {
+    type Error = Error;
+
+    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.mark_public_raw(slice).map_err(Error::from)
+    }
+
+    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.mark_private_raw(slice).map_err(Error::from)
+    }
+
+    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.mark_blind_raw(slice).map_err(Error::from)
     }
 }
 
@@ -161,7 +165,7 @@ where
             for (call, output, result) in outputs {
                 let garbled_circuit = result.unwrap();
                 self.preprocessed.insert(output, (call, garbled_circuit));
-                self.store.mark_output(output)?;
+                self.store.mark_output(output);
             }
         }
 
@@ -199,10 +203,7 @@ where
                 .unwrap();
 
             for (output_ref, output) in output_refs.into_iter().zip(outputs) {
-                self.store
-                    .set_output(output_ref, &output.outputs)
-                    .map_err(Error::from)?;
-                self.store.mark_output(output_ref)?;
+                self.store.set_output(output_ref, &output.outputs)?;
             }
 
             self.store.flush_decode()?;

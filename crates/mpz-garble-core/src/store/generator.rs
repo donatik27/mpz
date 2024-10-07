@@ -4,16 +4,16 @@ use mpz_memory_core::{
     correlated::{Delta, Key, KeyStore, KeyStoreError},
     store::{BitStore, StoreError},
     view::View,
-    DecodeError, DecodeFuture, DecodeOp, Memory, Slice,
+    DecodeError, DecodeFuture, DecodeOp, Memory, Slice, View as ViewTrait,
 };
 use rand::Rng;
 use utils::{
     filter_drain::FilterDrain,
-    range::{Intersection, Subset},
+    range::{Disjoint, Intersection, Subset},
 };
 
 use crate::store::{
-    CommitState, DecodeState, EvaluatorFlush, FlushState, GeneratorFlush, MacProof, OutputState,
+    DecodeState, EvaluatorFlush, FlushState, GeneratorFlush, InputState, MacProof, OutputState,
 };
 
 type Error = GeneratorStoreError;
@@ -25,7 +25,7 @@ pub struct GeneratorStore {
     key_store: KeyStore,
     data_store: BitStore,
     view: View,
-    commit_state: CommitState,
+    input_state: InputState,
     decode_state: DecodeState,
     output_state: OutputState,
     flush_state: FlushState,
@@ -41,7 +41,7 @@ impl GeneratorStore {
             key_store: KeyStore::new(delta),
             data_store: BitStore::new(),
             view: View::default(),
-            commit_state: CommitState::default(),
+            input_state: InputState::default(),
             decode_state: DecodeState::default(),
             output_state: OutputState::default(),
             flush_state: FlushState::default(),
@@ -61,7 +61,7 @@ impl GeneratorStore {
 
     /// Returns whether the slice is committed.
     pub fn is_committed(&self, slice: Slice) -> bool {
-        slice.to_range().is_subset(&self.commit_state.complete)
+        slice.to_range().is_subset(&self.input_state.complete)
     }
 
     /// Returns keys if they are set.
@@ -79,46 +79,53 @@ impl GeneratorStore {
         self.key_store.alloc(len);
         let slice = self.data_store.alloc(len);
 
-        // Mark it as pending until it is executed.
-        self.output_state.pending |= slice.to_range();
+        let range = slice.to_range();
+        self.output_state.uninit |= &range;
+        self.output_state.all |= range;
 
         slice
     }
 
     /// Sets the keys for output data.
     pub fn set_output(&mut self, slice: Slice, keys: &[Key]) -> Result<()> {
-        self.key_store.try_set(slice, keys).map_err(Error::from)
+        self.key_store.try_set(slice, keys)?;
+
+        self.output_state.uninit -= slice.to_range();
+        self.output_state.preprocessed |= slice.to_range();
+
+        Ok(())
     }
 
-    /// Marks an output as computed.
+    /// Marks an output as executed.
     ///
     /// This indicates that both parties have *executed* the call which produces
     /// this output.
-    pub fn mark_output(&mut self, slice: Slice) -> Result<()> {
+    pub fn mark_output(&mut self, slice: Slice) {
         let range = slice.to_range();
-        if !range.is_subset(&self.output_state.pending) {
-            return Err(ErrorRepr::NotPending { slice }.into());
-        }
-
-        self.output_state.pending -= slice.to_range();
-
-        Ok(())
+        self.output_state.preprocessed -= &range;
+        self.output_state.complete |= range;
     }
 
     /// Updates the flush state and returns `true` if the store wants to flush.
     pub fn wants_flush(&mut self) -> bool {
         // Send MACs for visible data.
-        self.flush_state.macs = self.commit_state.pending.clone() & self.view.visible();
+        self.flush_state.macs = self.input_state.pending.clone() & self.view.visible();
         // Send MACs using OT for blind data.
-        self.flush_state.ot = self.commit_state.pending.clone() & self.view.blind();
-        // Send key bits for all set keys. Some output keys may not be computed yet.
-        self.flush_state.key_bits = self.decode_state.start.clone() & self.key_store.set_ranges();
-        // Expect MAC proofs for all blind data we want to decode, except for outputs
-        // which are pending.
-        self.flush_state.decode =
-            (self.decode_state.key_bits.clone() - self.view.visible()) - &self.output_state.pending;
+        self.flush_state.ot = self.input_state.pending.clone() & self.view.blind();
 
-        dbg!(&self.flush_state);
+        let private_inputs = self.input_state.all.clone() & self.view.private();
+        let blind_inputs = self.input_state.all.clone() & self.view.blind();
+        let initialized_outputs = self.output_state.all.clone() - &self.output_state.uninit;
+        let executed_outputs = &self.output_state.complete;
+        let sent_key_bits = &self.decode_state.key_bits;
+        let wants_decode = self.decode_state.all.clone() - &self.decode_state.complete;
+
+        // Send evaluator key bits for private inputs and initialized outputs.
+        self.flush_state.key_bits =
+            ((private_inputs | initialized_outputs) - sent_key_bits) & &wants_decode;
+        // Expect MAC proofs for blind inputs and executed outputs.
+        self.flush_state.decode =
+            (blind_inputs | (executed_outputs.clone() & sent_key_bits)) & wants_decode;
 
         !self.flush_state.is_empty()
     }
@@ -211,12 +218,11 @@ impl ReceiveFlush<'_> {
             }
         }
 
-        self.store.commit_state.pending -= &idx.macs;
-        self.store.commit_state.pending -= &idx.ot;
-        self.store.commit_state.complete |= &idx.macs;
-        self.store.commit_state.complete |= &idx.ot;
+        self.store.input_state.pending -= &idx.macs;
+        self.store.input_state.pending -= &idx.ot;
+        self.store.input_state.complete |= &idx.macs;
+        self.store.input_state.complete |= &idx.ot;
 
-        self.store.decode_state.start -= &idx.key_bits;
         self.store.decode_state.key_bits |= &idx.key_bits;
         self.store.decode_state.complete |= &idx.decode;
 
@@ -234,42 +240,20 @@ impl Memory<Binary> for GeneratorStore {
         let keys = (0..size).map(|_| self.prg.gen()).collect::<Vec<_>>();
         self.view.alloc(size);
         self.key_store.alloc_with(&keys);
-        Ok(self.data_store.alloc(size))
-    }
+        let slice = self.data_store.alloc(size);
 
-    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
-        if self.view.is_set_any(slice) {
-            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
-        }
+        let range = slice.to_range();
+        self.input_state.uncommitted |= &range;
+        self.input_state.all |= &range;
 
-        self.view.set_public(slice);
-
-        Ok(())
-    }
-
-    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
-        if self.view.is_set_any(slice) {
-            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
-        }
-
-        self.view.set_private(slice);
-
-        Ok(())
-    }
-
-    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
-        if self.view.is_set_any(slice) {
-            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
-        }
-
-        self.view.set_blind(slice);
-
-        Ok(())
+        Ok(slice)
     }
 
     fn assign_raw(&mut self, slice: Slice, data: BitVec) -> Result<()> {
         if !self.view.is_visible(slice) {
             return Err(ErrorRepr::AssignedBlind { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            todo!("can not assign to output");
         }
 
         self.data_store.try_set(slice, &data)?;
@@ -281,6 +265,8 @@ impl Memory<Binary> for GeneratorStore {
         // Make sure visibility is set.
         if !self.view.is_set(slice) {
             return Err(ErrorRepr::VisibilityNotSet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            todo!("can not commit output");
         }
 
         let range = slice.to_range();
@@ -294,7 +280,8 @@ impl Memory<Binary> for GeneratorStore {
             }
         }
 
-        self.commit_state.push_range(&range);
+        self.input_state.uncommitted -= &range;
+        self.input_state.pending |= &range;
 
         Ok(())
     }
@@ -309,9 +296,49 @@ impl Memory<Binary> for GeneratorStore {
             self.buffer_decode.push(op);
         }
 
-        self.decode_state.push(&slice.to_range());
+        self.decode_state.all |= slice.to_range();
 
         Ok(fut)
+    }
+}
+
+impl ViewTrait for GeneratorStore {
+    type Error = Error;
+
+    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            todo!("can not set output visibility");
+        }
+
+        self.view.set_public(slice);
+
+        Ok(())
+    }
+
+    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            todo!("can not set output visibility");
+        }
+
+        self.view.set_private(slice);
+
+        Ok(())
+    }
+
+    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            todo!("can not set output visibility");
+        }
+
+        self.view.set_blind(slice);
+
+        Ok(())
     }
 }
 
@@ -460,7 +487,7 @@ mod tests {
             "should not be set until after marked ready"
         );
 
-        store.mark_output(slice).unwrap();
+        store.mark_output(slice);
 
         assert!(store.wants_flush());
     }

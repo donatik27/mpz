@@ -1,8 +1,6 @@
 mod evaluator;
 mod generator;
 
-use std::ops::Range;
-
 use blake3::Hash;
 pub use evaluator::{EvaluatorStore, EvaluatorStoreError};
 pub use generator::{GeneratorStore, GeneratorStoreError};
@@ -10,41 +8,34 @@ pub use generator::{GeneratorStore, GeneratorStoreError};
 use mpz_core::bitvec::BitVec;
 use mpz_memory_core::correlated::Mac;
 use serde::{Deserialize, Serialize};
-use utils::range::{Difference, RangeSet};
+use utils::range::RangeSet;
 
 #[derive(Debug, Default)]
-pub struct CommitState {
+pub struct InputState {
+    /// Ranges which are allocated but not committed.
+    uncommitted: RangeSet<usize>,
     /// Ranges which are pending commitment.
     pending: RangeSet<usize>,
     /// Ranges which are fully committed in both parties views.
     complete: RangeSet<usize>,
-    /// Ranges which have been pushed. This makes sure we don't get duplicates
-    /// in different states.
+    /// All input ranges.
     all: RangeSet<usize>,
-}
-
-impl CommitState {
-    fn push_range(&mut self, range: &Range<usize>) {
-        let new = range.difference(&self.all);
-        if !new.is_empty() {
-            self.pending |= &new;
-            self.all |= &new;
-        }
-    }
 }
 
 #[derive(Debug, Default)]
 pub struct OutputState {
-    /// Output ranges which are allocated but not computed.
-    pending: RangeSet<usize>,
-    /// Output ranges which are computed.
+    /// Output ranges which are allocated but not initialized.
+    uninit: RangeSet<usize>,
+    /// Output ranges which are preprocessed but not executed.
+    preprocessed: RangeSet<usize>,
+    /// Output ranges which are executed.
     complete: RangeSet<usize>,
+    /// All output ranges.
+    all: RangeSet<usize>,
 }
 
 #[derive(Debug, Default)]
 pub struct DecodeState {
-    /// Ranges which are starting decoding.
-    start: RangeSet<usize>,
     /// Ranges which have key bits sent.
     key_bits: RangeSet<usize>,
     /// Ranges which have already been decoded.
@@ -52,16 +43,6 @@ pub struct DecodeState {
     /// Ranges which have been pushed. This makes sure we don't get duplicates
     /// in different states.
     all: RangeSet<usize>,
-}
-
-impl DecodeState {
-    fn push(&mut self, range: &Range<usize>) {
-        let new = range.difference(&self.all);
-        if !new.is_empty() {
-            self.start |= &new;
-            self.all |= &new;
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,7 +166,7 @@ mod tests {
     use mpz_memory_core::{
         binary::U8,
         correlated::{Delta, Key},
-        Array, MemoryExt,
+        Array, MemoryExt, ViewExt,
     };
     use mpz_ot_core::{ideal::cot::IdealCOT, COTReceiverOutput};
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -257,17 +238,6 @@ mod tests {
         let mut fut_a_ev = ev.decode(ref_a_ev).unwrap();
         let mut fut_b_ev = ev.decode(ref_b_ev).unwrap();
         let mut fut_c_ev = ev.decode(ref_c_ev).unwrap();
-
-        assert!(gen.wants_flush());
-        assert!(ev.wants_flush());
-
-        let (gen_receive, gen_flush, keys) = gen.flush().unwrap();
-        assert!(keys.is_empty());
-        let (ev_receive, ev_flush, choices) = ev.flush().unwrap();
-        assert!(choices.is_empty());
-
-        gen_receive.receive(ev_flush).unwrap();
-        ev_receive.receive(gen_flush, Vec::default()).unwrap();
 
         assert!(gen.wants_flush());
         assert!(ev.wants_flush());
