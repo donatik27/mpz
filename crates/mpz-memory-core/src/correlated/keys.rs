@@ -6,7 +6,7 @@ use mpz_core::{
     Block,
 };
 use rand::{distributions::Standard, prelude::Distribution};
-use utils::range::{Disjoint, Union};
+use utils::range::Disjoint;
 
 use crate::{
     correlated::{macs::Mac, Delta, MAC_ONE, MAC_ZERO},
@@ -198,7 +198,7 @@ impl KeyStore {
 
     /// Returns keys if they are set.
     ///
-    /// # Safety
+    /// # Security
     ///
     /// **Never** use this method to transfer MACs to the receiver.
     ///
@@ -259,7 +259,7 @@ impl KeyStore {
         }
 
         let range = slice.to_range();
-        self.used = self.used.union(&range);
+        self.used |= range;
 
         Ok(data
             .iter()
@@ -278,7 +278,7 @@ impl KeyStore {
         }
 
         let keys = self.keys.try_get(slice).expect("keys should be set");
-        self.used = self.used.union(&slice.to_range());
+        self.used |= slice.to_range();
 
         Ok(keys)
     }

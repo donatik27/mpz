@@ -1,101 +1,56 @@
-mod decode;
+mod call;
 
-pub use decode::{DecodeFuture, DecodeFutureTyped, DecodeOp};
+pub use call::{Call, CallBuilder, CallError};
+pub use mpz_memory_core as memory;
 
-use std::sync::Arc;
-
-use mpz_circuits::Circuit;
-use mpz_memory_core::{AssignKind, Slice, ToRaw};
-
-#[derive(Debug, Clone)]
-pub struct AssignOp {
-    /// Memory slice.
-    pub slice: Slice,
-    /// Assign kind.
-    pub kind: AssignKind,
+pub mod prelude {
+    pub use crate::{Execute, VmExt};
+    pub use mpz_memory_core::{Array, MemoryExt, Slice};
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum CallError {
-    #[error("input count mismatch: expected {expected}, got {actual}")]
-    InputCount { expected: usize, actual: usize },
-    #[error("input length mismatch: input {idx} expected {expected}, got {actual}")]
-    InputLength {
-        idx: usize,
-        expected: usize,
-        actual: usize,
-    },
+use async_trait::async_trait;
+
+use mpz_memory_core::{Memory, MemoryType, Repr, Slice};
+
+/// Virtual machine.
+pub trait Vm<T: MemoryType>: Memory<T, Error = <Self as Vm<T>>::Error> {
+    /// Error type for calling functions.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Calls a function, returning the output.
+    fn call_raw(&mut self, call: Call) -> Result<Slice, <Self as Vm<T>>::Error>;
 }
 
-#[derive(Debug)]
-pub struct CallBuilder {
-    circ: Arc<Circuit>,
-    inputs: Vec<Slice>,
-}
-
-impl CallBuilder {
-    pub fn new(circ: Arc<Circuit>) -> Self {
-        let input_len = circ.inputs().len();
-        Self {
-            circ,
-            inputs: Vec::with_capacity(input_len),
-        }
-    }
-
-    pub fn arg<T: ToRaw>(mut self, arg: T) -> Self {
-        self.inputs.push(arg.to_raw());
-        self
-    }
-
-    pub fn build(self) -> Result<Call, CallError> {
-        if self.circ.inputs().len() != self.inputs.len() {
-            return Err(CallError::InputCount {
-                expected: self.circ.inputs().len(),
-                actual: self.inputs.len(),
-            });
-        }
-
-        for (idx, (slice, input)) in self.inputs.iter().zip(self.circ.inputs()).enumerate() {
-            if slice.len() != input.len() {
-                return Err(CallError::InputLength {
-                    idx,
-                    expected: input.len(),
-                    actual: slice.len(),
-                });
-            }
-        }
-
-        Ok(Call {
-            circ: self.circ,
-            inputs: self.inputs,
-        })
+/// Extension trait for [`Callable`].
+pub trait VmExt<T: MemoryType>: Vm<T> {
+    /// Calls a function, returning the output.
+    fn call<R>(&mut self, call: Call) -> Result<R, <Self as Vm<T>>::Error>
+    where
+        R: Repr<T>,
+    {
+        self.call_raw(call).map(R::from_raw)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Call {
-    circ: Arc<Circuit>,
-    inputs: Vec<Slice>,
+impl<T, M> VmExt<M> for T
+where
+    T: Vm<M>,
+    M: MemoryType,
+{
 }
 
-impl Call {
-    /// Creates a new call builder.
-    pub fn new(circ: Arc<Circuit>) -> CallBuilder {
-        CallBuilder::new(circ)
-    }
+#[async_trait]
+pub trait Execute<Ctx> {
+    type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Returns the circuit.
-    pub fn circ(&self) -> &Circuit {
-        &self.circ
-    }
+    /// Flushes all memory operations.
+    ///
+    /// This ensures all memory operations are completed.
+    async fn flush(&mut self, ctx: &mut Ctx) -> Result<(), Self::Error>;
 
-    /// Returns the inputs.
-    pub fn inputs(&self) -> &[Slice] {
-        &self.inputs
-    }
+    /// Preprocesses the callstack.
+    async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<(), Self::Error>;
 
-    /// Consumes the call and returns the circuit and inputs.
-    pub fn into_parts(self) -> (Arc<Circuit>, Vec<Slice>) {
-        (self.circ, self.inputs)
-    }
+    /// Executes the callstack.
+    async fn execute(&mut self, ctx: &mut Ctx) -> Result<(), Self::Error>;
 }

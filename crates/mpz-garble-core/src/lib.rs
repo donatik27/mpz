@@ -72,9 +72,9 @@ const MAX_BATCH_SIZE: usize = 4 * KB;
 ///
 /// Batches are stack allocated, so we will limit the size to `MAX_BATCH_SIZE`.
 ///
-/// Additionally, because the size of each batch is static, if a circuit is smaller than a batch
-/// we will be wasting some bandwidth sending empty bytes. This puts an upper limit on that
-/// waste.
+/// Additionally, because the size of each batch is static, if a circuit is
+/// smaller than a batch we will be wasting some bandwidth sending empty bytes.
+/// This puts an upper limit on that waste.
 pub(crate) const DEFAULT_BATCH_SIZE: usize = MAX_BATCH_SIZE / BYTES_PER_GATE;
 
 #[cfg(test)]
@@ -279,7 +279,8 @@ mod tests {
     //     let mut gen_iter = gen
     //         .generate_batched(&circ, encoder.delta(), full_inputs)
     //         .unwrap();
-    //     let mut ev_consumer = ev.evaluate_batched(&circ, active_inputs).unwrap();
+    //     let mut ev_consumer = ev.evaluate_batched(&circ,
+    // active_inputs).unwrap();
 
     //     gen_iter.enable_hasher();
     //     ev_consumer.enable_hasher();

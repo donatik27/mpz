@@ -9,7 +9,7 @@ use mpz_core::{
     aes::{FixedKeyAes, FIXED_KEY_AES},
     Block,
 };
-use mpz_memory_core::correlated::{Delta, Key, Mac};
+use mpz_memory_core::correlated::{Delta, Key};
 
 /// Errors that can occur during garbled circuit generation.
 #[derive(Debug, thiserror::Error)]
@@ -191,7 +191,8 @@ where
         self.counter != self.and_count
     }
 
-    /// Returns the encoded outputs of the circuit, and the hash of the encrypted gates if present.
+    /// Returns the encoded outputs of the circuit, and the hash of the
+    /// encrypted gates if present.
     pub fn finish(mut self) -> Result<GeneratorOutput, GeneratorError> {
         if self.has_gates() {
             return Err(GeneratorError::NotFinished);
@@ -284,7 +285,8 @@ where
         self.0.has_gates()
     }
 
-    /// Returns the encoded outputs of the circuit, and the hash of the encrypted gates if present.
+    /// Returns the encoded outputs of the circuit, and the hash of the
+    /// encrypted gates if present.
     pub fn finish(self) -> Result<GeneratorOutput, GeneratorError> {
         self.0.finish()
     }
@@ -335,7 +337,8 @@ where
 //             .collect();
 
 //         let mut gen = Generator::default();
-//         let mut gate_iter = gen.generate(&AES128, encoder.delta(), inputs).unwrap();
+//         let mut gate_iter = gen.generate(&AES128, encoder.delta(),
+// inputs).unwrap();
 
 //         let enc_gates: Vec<EncryptedGate> = gate_iter.by_ref().collect();
 

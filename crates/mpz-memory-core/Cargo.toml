@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 itybity = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 mpz-ot-core = { workspace = true }

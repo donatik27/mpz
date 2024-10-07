@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use utils::range::{Difference, Disjoint, Intersection, Subset, Union};
+use utils::range::{Difference, Disjoint, Subset};
 
 use crate::{Range, RangeSet, Slice};
 
@@ -24,7 +24,7 @@ impl View {
     pub fn alloc(&mut self, len: usize) {
         let end = self.len;
         self.len += len;
-        self.uninit = self.uninit.union(&(end..end + len));
+        self.uninit |= end..end + len;
     }
 
     /// Returns the public ranges.
@@ -100,31 +100,31 @@ impl View {
     /// Sets the slice as public.
     pub fn set_public(&mut self, slice: Slice) {
         let range = slice.to_range();
-        self.public = self.public.union(&range);
-        self.visible = self.visible.union(&range);
-        self.uninit = self.uninit.difference(&range);
-        self.private = self.private.difference(&range);
-        self.blind = self.blind.difference(&range);
+        self.public |= &range;
+        self.visible |= &range;
+        self.uninit -= &range;
+        self.private -= &range;
+        self.blind -= &range;
     }
 
     /// Sets the slice as private.
     pub fn set_private(&mut self, slice: Slice) {
         let range = slice.to_range();
-        self.private = self.private.union(&range);
-        self.visible = self.visible.union(&range);
-        self.uninit = self.uninit.difference(&range);
-        self.public = self.public.difference(&range);
-        self.blind = self.blind.difference(&range);
+        self.private |= &range;
+        self.visible |= &range;
+        self.uninit -= &range;
+        self.public -= &range;
+        self.blind -= &range;
     }
 
     /// Sets the slice as blind.
     pub fn set_blind(&mut self, slice: Slice) {
         let range = slice.to_range();
-        self.blind = self.blind.union(&range);
-        self.visible = self.visible.difference(&range);
-        self.uninit = self.uninit.difference(&range);
-        self.public = self.public.difference(&range);
-        self.private = self.private.difference(&range);
+        self.blind |= &range;
+        self.visible -= &range;
+        self.uninit -= &range;
+        self.public -= &range;
+        self.private -= &range;
     }
 
     /// Returns an iterator over the public slices.

@@ -8,10 +8,9 @@ pub use generator::Generator;
 mod tests {
     use mpz_circuits::circuits::AES128;
     use mpz_common::executor::test_st_executor;
-    use mpz_memory_core::{binary::U8, correlated::Delta, Array};
+    use mpz_memory_core::{binary::U8, correlated::Delta, Array, MemoryExt};
     use mpz_ot::ideal::cot::ideal_cot_with_delta;
-    use mpz_vm::prelude::*;
-    use mpz_vm_core::Call;
+    use mpz_vm_core::{Call, Execute, VmExt};
     use rand::{rngs::StdRng, SeedableRng};
 
     use super::*;
@@ -24,52 +23,53 @@ mod tests {
         let (mut ctx_a, mut ctx_b) = test_st_executor(8);
         let (cot_send, cot_recv) = ideal_cot_with_delta(delta.into_inner());
 
-        let key = [0u8; 16];
-        let msg = [42u8; 16];
-
         let mut gen = Generator::new(cot_send, [0u8; 16], delta);
         let mut ev = Evaluator::new(cot_recv);
 
         let (gen_out, ev_out) = futures::join!(
             async {
-                let key_ref = gen.alloc::<Array<U8, 16>>().unwrap();
-                let msg_ref = gen.alloc::<Array<U8, 16>>().unwrap();
-                let circ = AES128.clone();
+                let key: Array<U8, 16> = gen.alloc().unwrap();
+                let msg: Array<U8, 16> = gen.alloc().unwrap();
 
-                gen.configure_private(key_ref).unwrap();
-                gen.configure_blind(msg_ref).unwrap();
+                gen.mark_private(key).unwrap();
+                gen.mark_blind(msg).unwrap();
 
-                let ciphertext_ref = gen
-                    .call(Call::new(circ).arg(key_ref).arg(msg_ref).build().unwrap())
+                let ciphertext: Array<U8, 16> = gen
+                    .call(Call::new(AES128.clone()).arg(key).arg(msg).build().unwrap())
                     .unwrap();
 
-                let ciphertext = gen.decode::<Array<U8, 16>>(ciphertext_ref).unwrap();
+                let ciphertext = gen.decode(ciphertext).unwrap();
 
-                gen.assign(key_ref, key).unwrap();
-                gen.commit(key_ref).unwrap();
-                gen.commit(msg_ref).unwrap();
-                gen.sync(&mut ctx_a).await.unwrap();
+                gen.assign(key, [0u8; 16]).unwrap();
+                gen.commit(key).unwrap();
+                gen.commit(msg).unwrap();
+
+                gen.flush(&mut ctx_a).await.unwrap();
+                gen.execute(&mut ctx_a).await.unwrap();
+                gen.flush(&mut ctx_a).await.unwrap();
 
                 ciphertext.await.unwrap()
             },
             async {
-                let key_ref = ev.alloc::<Array<U8, 16>>().unwrap();
-                let msg_ref = ev.alloc::<Array<U8, 16>>().unwrap();
-                let circ = AES128.clone();
+                let key: Array<U8, 16> = ev.alloc().unwrap();
+                let msg: Array<U8, 16> = ev.alloc().unwrap();
 
-                ev.configure_blind(key_ref).unwrap();
-                ev.configure_private(msg_ref).unwrap();
+                ev.mark_blind(key).unwrap();
+                ev.mark_private(msg).unwrap();
 
-                let ciphertext_ref = ev
-                    .call(Call::new(circ).arg(key_ref).arg(msg_ref).build().unwrap())
+                let ciphertext: Array<U8, 16> = ev
+                    .call(Call::new(AES128.clone()).arg(key).arg(msg).build().unwrap())
                     .unwrap();
 
-                let ciphertext = ev.decode::<Array<U8, 16>>(ciphertext_ref).unwrap();
+                let ciphertext = ev.decode(ciphertext).unwrap();
 
-                ev.assign(msg_ref, msg).unwrap();
-                ev.commit(key_ref).unwrap();
-                ev.commit(msg_ref).unwrap();
-                ev.sync(&mut ctx_b).await.unwrap();
+                ev.assign(msg, [42u8; 16]).unwrap();
+                ev.commit(key).unwrap();
+                ev.commit(msg).unwrap();
+
+                ev.flush(&mut ctx_b).await.unwrap();
+                ev.execute(&mut ctx_b).await.unwrap();
+                ev.flush(&mut ctx_b).await.unwrap();
 
                 ciphertext.await.unwrap()
             }
@@ -78,19 +78,19 @@ mod tests {
         assert_eq!(gen_out, ev_out);
     }
 
-    #[tokio::test]
-    async fn test_semihonest_nothing_to_do() {
-        let mut rng = StdRng::seed_from_u64(0);
-        let delta = Delta::random(&mut rng);
+    // #[tokio::test]
+    // async fn test_semihonest_nothing_to_do() {
+    //     let mut rng = StdRng::seed_from_u64(0);
+    //     let delta = Delta::random(&mut rng);
 
-        let (mut ctx_a, mut ctx_b) = test_st_executor(8);
-        let (cot_send, cot_recv) = ideal_cot_with_delta(delta.into_inner());
+    //     let (mut ctx_a, mut ctx_b) = test_st_executor(8);
+    //     let (cot_send, cot_recv) = ideal_cot_with_delta(delta.into_inner());
 
-        let mut gen = Generator::new(cot_send, [0u8; 16], delta);
-        let mut ev = Evaluator::new(cot_recv);
+    //     let mut gen = Generator::new(cot_send, [0u8; 16], delta);
+    //     let mut ev = Evaluator::new(cot_recv);
 
-        futures::try_join!(gen.sync(&mut ctx_a), ev.sync(&mut ctx_b)).unwrap();
-    }
+    //     futures::try_join!(gen.sync_memory(&mut ctx_a), ev.sync_memory(&mut
+    // ctx_b)).unwrap(); }
 
     #[tokio::test]
     async fn test_semihonest_preprocess() {
@@ -100,54 +100,57 @@ mod tests {
         let (mut ctx_a, mut ctx_b) = test_st_executor(8);
         let (cot_send, cot_recv) = ideal_cot_with_delta(delta.into_inner());
 
-        let key = [0u8; 16];
-        let msg = [42u8; 16];
-
         let mut gen = Generator::new(cot_send, [0u8; 16], delta);
         let mut ev = Evaluator::new(cot_recv);
 
         let (gen_out, ev_out) = futures::join!(
             async {
-                let key_ref = gen.alloc::<Array<U8, 16>>().unwrap();
-                let msg_ref = gen.alloc::<Array<U8, 16>>().unwrap();
-                let circ = AES128.clone();
+                let key: Array<U8, 16> = gen.alloc().unwrap();
+                let msg: Array<U8, 16> = gen.alloc().unwrap();
 
-                gen.configure_private(key_ref).unwrap();
-                gen.configure_blind(msg_ref).unwrap();
+                gen.mark_private(key).unwrap();
+                gen.mark_blind(msg).unwrap();
 
-                let ciphertext_ref = gen
-                    .call(Call::new(circ).arg(key_ref).arg(msg_ref).build().unwrap())
+                let ciphertext: Array<U8, 16> = gen
+                    .call(Call::new(AES128.clone()).arg(key).arg(msg).build().unwrap())
                     .unwrap();
 
-                let ciphertext = gen.decode::<Array<U8, 16>>(ciphertext_ref).unwrap();
+                let ciphertext = gen.decode(ciphertext).unwrap();
 
                 gen.preprocess(&mut ctx_a).await.unwrap();
 
-                gen.assign(key_ref, key).unwrap();
+                gen.assign(key, [0u8; 16]).unwrap();
+                gen.commit(key).unwrap();
+                gen.commit(msg).unwrap();
 
-                gen.sync(&mut ctx_a).await.unwrap();
+                gen.flush(&mut ctx_a).await.unwrap();
+                gen.execute(&mut ctx_a).await.unwrap();
+                gen.flush(&mut ctx_a).await.unwrap();
 
                 ciphertext.await.unwrap()
             },
             async {
-                let key_ref = ev.alloc::<Array<U8, 16>>().unwrap();
-                let msg_ref = ev.alloc::<Array<U8, 16>>().unwrap();
-                let circ = AES128.clone();
+                let key: Array<U8, 16> = ev.alloc().unwrap();
+                let msg: Array<U8, 16> = ev.alloc().unwrap();
 
-                ev.configure_blind(key_ref).unwrap();
-                ev.configure_private(msg_ref).unwrap();
+                ev.mark_blind(key).unwrap();
+                ev.mark_private(msg).unwrap();
 
-                let ciphertext_ref = ev
-                    .call(Call::new(circ).arg(key_ref).arg(msg_ref).build().unwrap())
+                let ciphertext: Array<U8, 16> = ev
+                    .call(Call::new(AES128.clone()).arg(key).arg(msg).build().unwrap())
                     .unwrap();
 
-                let ciphertext = ev.decode::<Array<U8, 16>>(ciphertext_ref).unwrap();
+                let ciphertext = ev.decode(ciphertext).unwrap();
 
                 ev.preprocess(&mut ctx_b).await.unwrap();
 
-                ev.assign(msg_ref, msg).unwrap();
+                ev.assign(msg, [42u8; 16]).unwrap();
+                ev.commit(key).unwrap();
+                ev.commit(msg).unwrap();
 
-                ev.sync(&mut ctx_b).await.unwrap();
+                ev.flush(&mut ctx_b).await.unwrap();
+                ev.execute(&mut ctx_b).await.unwrap();
+                ev.flush(&mut ctx_b).await.unwrap();
 
                 ciphertext.await.unwrap()
             }

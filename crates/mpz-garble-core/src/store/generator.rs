@@ -1,27 +1,23 @@
-use std::mem;
-
-use mpz_core::{
-    bitvec::{BitSlice, BitVec},
-    prg::Prg,
-};
+use mpz_core::{bitvec::BitVec, prg::Prg};
 use mpz_memory_core::{
+    binary::Binary,
     correlated::{Delta, Key, KeyStore, KeyStoreError},
     store::{BitStore, StoreError},
     view::View,
-    AssignKind, Slice,
+    DecodeError, DecodeFuture, DecodeOp, Memory, Slice,
 };
-use mpz_vm_core::{AssignOp, DecodeFuture, DecodeOp};
 use rand::Rng;
 use utils::{
     filter_drain::FilterDrain,
-    range::{Difference, Disjoint, Intersection, Subset, Union},
+    range::{Intersection, Subset},
 };
 
-use crate::store::{KeyBitPayload, MacPayload, MacProof, OTKeyPayload};
+use crate::store::{
+    CommitState, DecodeState, EvaluatorFlush, FlushState, GeneratorFlush, MacProof, OutputState,
+};
 
 type Error = GeneratorStoreError;
 type Result<T> = core::result::Result<T, Error>;
-type RangeSet = utils::range::RangeSet<usize>;
 
 #[derive(Debug)]
 pub struct GeneratorStore {
@@ -29,21 +25,10 @@ pub struct GeneratorStore {
     key_store: KeyStore,
     data_store: BitStore,
     view: View,
-
-    /// Ranges which are computed outputs.
-    idx_outputs: RangeSet,
-    /// Ranges for which commitment is pending.
-    idx_pending_commit: RangeSet,
-    /// Ranges which have been committed.
-    idx_committed: RangeSet,
-    /// Ranges for which key bits have been sent.
-    idx_key_bits: RangeSet,
-    /// Ranges for which key bits are pending.
-    idx_pending_key_bits: RangeSet,
-    /// Ranges which have already been decoded.
-    idx_decoded: RangeSet,
-    /// Ranges for which we are waiting for MACs to decode.
-    idx_pending_decode: RangeSet,
+    commit_state: CommitState,
+    decode_state: DecodeState,
+    output_state: OutputState,
+    flush_state: FlushState,
 
     buffer_decode: Vec<DecodeOp<BitVec>>,
 }
@@ -56,13 +41,10 @@ impl GeneratorStore {
             key_store: KeyStore::new(delta),
             data_store: BitStore::new(),
             view: View::default(),
-            idx_outputs: RangeSet::default(),
-            idx_pending_commit: RangeSet::default(),
-            idx_committed: RangeSet::default(),
-            idx_key_bits: RangeSet::default(),
-            idx_pending_key_bits: RangeSet::default(),
-            idx_decoded: RangeSet::default(),
-            idx_pending_decode: RangeSet::default(),
+            commit_state: CommitState::default(),
+            decode_state: DecodeState::default(),
+            output_state: OutputState::default(),
+            flush_state: FlushState::default(),
             buffer_decode: Vec::new(),
         }
     }
@@ -77,52 +59,18 @@ impl GeneratorStore {
         self.key_store.is_set(slice)
     }
 
-    /// Returns whether the keys are assigned for a slice.
-    pub fn is_assigned_keys(&self, slice: Slice) -> bool {
-        self.key_store.is_used(slice)
+    /// Returns whether the slice is committed.
+    pub fn is_committed(&self, slice: Slice) -> bool {
+        slice.to_range().is_subset(&self.commit_state.complete)
     }
 
-    /// Returns whether the data is set for a slice.
-    pub fn is_set_data(&self, slice: Slice) -> bool {
-        self.data_store.is_set(slice)
-    }
-
-    /// Returns `true` if the store wants to commit.
-    pub fn wants_commit(&self) -> bool {
-        !self.idx_pending_commit.is_empty()
-    }
-
-    /// Returns `true` if the store wants to send MACs via oblivious transfer.
-    pub fn wants_oblivious_transfer(&self) -> bool {
-        !self
-            .idx_pending_commit
-            .intersection(self.view.blind())
-            .is_empty()
-    }
-
-    /// Returns `true` if the store wants to send key bits.
-    pub fn wants_send_key_bits(&self) -> bool {
-        !self
-            .idx_pending_key_bits
-            .intersection(self.key_store.set_ranges())
-            .is_empty()
-    }
-
-    /// Returns `true` if the store wants to verify data.
-    pub fn wants_verify_data(&self) -> bool {
-        !self.idx_pending_decode.is_empty()
-    }
-
+    /// Returns keys if they are set.
+    ///
+    /// # Security
+    ///
+    /// **Never** use this method to transfer MACs to the evaluator.
     pub fn try_get_keys(&self, slice: Slice) -> Result<&[Key]> {
         self.key_store.try_get(slice).map_err(Error::from)
-    }
-
-    /// Allocates memory for a value.
-    pub fn alloc(&mut self, len: usize) -> Slice {
-        let keys = (0..len).map(|_| self.prg.gen()).collect::<Vec<_>>();
-        self.view.alloc(len);
-        self.key_store.alloc_with(&keys);
-        self.data_store.alloc(len)
     }
 
     /// Allocates uninitialized memory for output values.
@@ -130,19 +78,168 @@ impl GeneratorStore {
         self.view.alloc(len);
         self.key_store.alloc(len);
         let slice = self.data_store.alloc(len);
-        self.idx_outputs = self.idx_outputs.union(&slice.to_range());
+
+        // Mark it as pending until it is executed.
+        self.output_state.pending |= slice.to_range();
+
         slice
     }
 
-    /// Sets the output keys for a circuit.
+    /// Sets the keys for output data.
     pub fn set_output(&mut self, slice: Slice, keys: &[Key]) -> Result<()> {
         self.key_store.try_set(slice, keys).map_err(Error::from)
     }
 
-    /// Configures the slice as public.
-    pub fn configure_public(&mut self, slice: Slice) -> Result<()> {
+    /// Marks an output as computed.
+    ///
+    /// This indicates that both parties have *executed* the call which produces
+    /// this output.
+    pub fn mark_output(&mut self, slice: Slice) -> Result<()> {
+        let range = slice.to_range();
+        if !range.is_subset(&self.output_state.pending) {
+            return Err(ErrorRepr::NotPending { slice }.into());
+        }
+
+        self.output_state.pending -= slice.to_range();
+
+        Ok(())
+    }
+
+    /// Updates the flush state and returns `true` if the store wants to flush.
+    pub fn wants_flush(&mut self) -> bool {
+        // Send MACs for visible data.
+        self.flush_state.macs = self.commit_state.pending.clone() & self.view.visible();
+        // Send MACs using OT for blind data.
+        self.flush_state.ot = self.commit_state.pending.clone() & self.view.blind();
+        // Send key bits for all set keys. Some output keys may not be computed yet.
+        self.flush_state.key_bits = self.decode_state.start.clone() & self.key_store.set_ranges();
+        // Expect MAC proofs for all blind data we want to decode, except for outputs
+        // which are pending.
+        self.flush_state.decode =
+            (self.decode_state.key_bits.clone() - self.view.visible()) - &self.output_state.pending;
+
+        dbg!(&self.flush_state);
+
+        !self.flush_state.is_empty()
+    }
+
+    /// Flushes pending operations.
+    ///
+    /// Returns the flush receiver, message and the keys if oblivious transfer
+    /// is required.
+    pub fn flush(&mut self) -> Result<(ReceiveFlush<'_>, GeneratorFlush, Vec<Key>)> {
+        let idx = self.flush_state.clone();
+
+        // Collect MACs.
+        let mut macs = Vec::with_capacity(idx.macs.len());
+        for range in idx.macs.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+            let data = self.data_store.try_get(slice)?;
+            macs.extend(self.key_store.authenticate(slice, data)?);
+        }
+
+        // Collect keys for OT.
+        let mut keys = Vec::with_capacity(idx.ot.len());
+        for range in idx.ot.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+            keys.extend_from_slice(self.key_store.oblivious_transfer(slice)?);
+        }
+
+        // Collect key bits.
+        let mut key_bits = BitVec::with_capacity(idx.key_bits.len());
+        for range in idx.key_bits.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+            key_bits.extend(self.key_store.try_get_bits(slice)?);
+        }
+
+        let flush = GeneratorFlush {
+            idx,
+            macs,
+            key_bits,
+        };
+
+        Ok((ReceiveFlush { store: self }, flush, keys))
+    }
+
+    /// Flushes decode operations.
+    fn flush_decode(&mut self) -> Result<()> {
+        for mut op in self
+            .buffer_decode
+            .filter_drain(|op| self.data_store.is_set(op.slice))
+        {
+            let data = self.data_store.try_get(op.slice)?;
+            op.send(data.to_bitvec())?;
+        }
+
+        Ok(())
+    }
+}
+
+#[must_use]
+pub struct ReceiveFlush<'a> {
+    store: &'a mut GeneratorStore,
+}
+
+impl ReceiveFlush<'_> {
+    /// Receives a flush from the evaluator.
+    pub fn receive(self, flush: EvaluatorFlush) -> Result<()> {
+        let EvaluatorFlush {
+            idx,
+            mac_proof: macs,
+        } = flush;
+
+        // Ensure the evaluators flush is consistent.
+        if idx != self.store.flush_state {
+            return Err(ErrorRepr::FlushIdx {
+                expected: self.store.flush_state.clone(),
+                actual: idx,
+            }
+            .into());
+        }
+
+        // Verify MACs and store the data.
+        if let Some(MacProof { mut bits, proof }) = macs {
+            self.store.key_store.verify(&idx.decode, &mut bits, proof)?;
+
+            let mut i = 0;
+            for range in idx.decode.iter_ranges() {
+                let slice = Slice::from_range_unchecked(range);
+                self.store
+                    .data_store
+                    .try_set(slice, &bits[i..i + slice.len()])?;
+                i += slice.len();
+            }
+        }
+
+        self.store.commit_state.pending -= &idx.macs;
+        self.store.commit_state.pending -= &idx.ot;
+        self.store.commit_state.complete |= &idx.macs;
+        self.store.commit_state.complete |= &idx.ot;
+
+        self.store.decode_state.start -= &idx.key_bits;
+        self.store.decode_state.key_bits |= &idx.key_bits;
+        self.store.decode_state.complete |= &idx.decode;
+
+        self.store.flush_state.clear();
+        self.store.flush_decode()?;
+
+        Ok(())
+    }
+}
+
+impl Memory<Binary> for GeneratorStore {
+    type Error = Error;
+
+    fn alloc_raw(&mut self, size: usize) -> Result<Slice> {
+        let keys = (0..size).map(|_| self.prg.gen()).collect::<Vec<_>>();
+        self.view.alloc(size);
+        self.key_store.alloc_with(&keys);
+        Ok(self.data_store.alloc(size))
+    }
+
+    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
         if self.view.is_set_any(slice) {
-            todo!("view is already set");
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
         }
 
         self.view.set_public(slice);
@@ -150,10 +247,9 @@ impl GeneratorStore {
         Ok(())
     }
 
-    /// Configures the slice as private.
-    pub fn configure_private(&mut self, slice: Slice) -> Result<()> {
+    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
         if self.view.is_set_any(slice) {
-            todo!("view is already set");
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
         }
 
         self.view.set_private(slice);
@@ -161,10 +257,9 @@ impl GeneratorStore {
         Ok(())
     }
 
-    /// Configures the slice as blind.
-    pub fn configure_blind(&mut self, slice: Slice) -> Result<()> {
+    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
         if self.view.is_set_any(slice) {
-            todo!("view is already set");
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
         }
 
         self.view.set_blind(slice);
@@ -172,152 +267,58 @@ impl GeneratorStore {
         Ok(())
     }
 
-    /// Assigns data to memory.
-    pub fn assign(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
+    fn assign_raw(&mut self, slice: Slice, data: BitVec) -> Result<()> {
         if !self.view.is_visible(slice) {
-            todo!("memory not configured as visible");
+            return Err(ErrorRepr::AssignedBlind { slice }.into());
         }
 
-        self.data_store.try_set(slice, data)?;
+        self.data_store.try_set(slice, &data)?;
 
         Ok(())
     }
 
-    /// Commits the slice.
-    pub fn commit(&mut self, slice: Slice) -> Result<()> {
+    fn commit_raw(&mut self, slice: Slice) -> Result<()> {
+        // Make sure visibility is set.
+        if !self.view.is_set(slice) {
+            return Err(ErrorRepr::VisibilityNotSet { slice }.into());
+        }
+
         let range = slice.to_range();
-        if !range.is_disjoint(&self.idx_committed) {
-            todo!("slice already committed");
+
+        // Make sure all visible ranges are assigned.
+        let visible = range.intersection(self.view.visible());
+        for range in visible.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+            if !self.data_store.is_set(slice) {
+                return Err(ErrorRepr::NotAssigned { slice }.into());
+            }
         }
 
-        self.idx_pending_commit = range.union(&self.idx_pending_commit);
+        self.commit_state.push_range(&range);
 
         Ok(())
     }
 
-    /// Returns a future which will resolve to the value when it is decoded.
-    pub fn decode(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
+    fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
         let (fut, mut op) = DecodeFuture::new(slice);
 
         // If data is already decoded, send it immediately.
         if let Ok(data) = self.data_store.try_get(slice) {
-            op.send(data.to_bitvec()).unwrap();
+            op.send(data.to_bitvec())?;
         } else {
             self.buffer_decode.push(op);
         }
 
-        let range = slice.to_range();
-
-        // Determine which key bits haven't been sent yet then mark them pending.
-        let idx_not_sent = range.difference(&self.idx_key_bits);
-        if !idx_not_sent.is_empty() {
-            // Add it to pending.
-            self.idx_pending_key_bits = self.idx_pending_key_bits.union(&idx_not_sent);
-        }
-
-        // Determine which MACs we need to receive then mark them pending.
-        let idx_not_decoded = range.difference(&self.idx_decoded);
-        if !idx_not_decoded.is_empty() {
-            // Add it to pending.
-            self.idx_pending_decode = self.idx_pending_decode.union(&idx_not_decoded);
-        }
+        self.decode_state.push(&slice.to_range());
 
         Ok(fut)
-    }
-
-    /// Sends pending MACs to the evaluator.
-    pub fn send_macs(&mut self) -> Result<MacPayload> {
-        let idx = self.idx_pending_commit.intersection(self.view.visible());
-
-        let mut macs = Vec::with_capacity(idx.len());
-        for range in idx.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-            let data = self.data_store.try_get(slice).expect("data should be set");
-            macs.extend(self.key_store.authenticate(slice, data)?);
-        }
-
-        self.idx_pending_commit = self.idx_pending_commit.difference(&idx);
-
-        Ok(MacPayload { idx, macs })
-    }
-
-    /// Sends pending MACs to the evaluator using oblivious transfer.
-    pub fn oblivious_transfer(&mut self) -> Result<OTKeyPayload> {
-        let idx = self.idx_pending_commit.intersection(self.view.blind());
-
-        let mut keys = Vec::with_capacity(idx.len());
-        for range in idx.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-
-            // Store protects against keys being transferred multiple times.
-            let keys_ = self.key_store.oblivious_transfer(slice)?;
-
-            keys.extend_from_slice(keys_);
-        }
-
-        self.idx_pending_commit = self.idx_pending_commit.difference(&idx);
-
-        Ok(OTKeyPayload { idx, keys })
-    }
-
-    /// Sends pending key bits to the evaluator.
-    pub fn send_key_bits(&mut self) -> Result<KeyBitPayload> {
-        let idx = mem::take(&mut self.idx_pending_key_bits);
-
-        let mut key_bits = BitVec::new();
-        for range in idx.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-            key_bits.extend(self.key_store.try_get_bits(slice)?);
-        }
-
-        Ok(KeyBitPayload { idx, key_bits })
-    }
-
-    /// Verifies a proof of MACs from the evaluator.
-    ///
-    /// Resolves corresponding decode operations.
-    pub fn verify_macs(&mut self, payload: MacProof) -> Result<()> {
-        let MacProof {
-            idx,
-            mut bits,
-            proof,
-        } = payload;
-
-        if !idx.is_subset(&self.idx_pending_decode) {
-            todo!("unexpected decode payload");
-        }
-
-        self.key_store.verify(&idx, &mut bits, proof)?;
-
-        let mut i = 0;
-        for range in idx.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-            self.data_store.try_set(slice, &bits[i..i + slice.len()])?;
-            i += slice.len();
-        }
-
-        self.idx_pending_decode = self.idx_pending_decode.difference(&idx);
-        self.idx_decoded = self.idx_decoded.union(&idx);
-
-        for mut op in self
-            .buffer_decode
-            .filter_drain(|op| self.data_store.is_set(op.slice))
-        {
-            let data = self
-                .data_store
-                .try_get(op.slice)
-                .expect("data should be set");
-            op.send(data.to_bitvec()).unwrap();
-        }
-
-        Ok(())
     }
 }
 
 /// Error for [`GeneratorStore`].
 #[derive(Debug, thiserror::Error)]
 #[error("generator store error: {}", .0)]
-pub struct GeneratorStoreError(ErrorRepr);
+pub struct GeneratorStoreError(#[from] ErrorRepr);
 
 #[derive(Debug, thiserror::Error)]
 enum ErrorRepr {
@@ -325,6 +326,23 @@ enum ErrorRepr {
     KeyStore(KeyStoreError),
     #[error(transparent)]
     Store(StoreError),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("visibility not set for slice: {slice}")]
+    VisibilityNotSet { slice: Slice },
+    #[error("visibility already set for slice: {slice}")]
+    VisibilityAlreadySet { slice: Slice },
+    #[error("attempted to commit visible memory which is not assigned: {slice}")]
+    NotAssigned { slice: Slice },
+    #[error("attempted to assign to blind memory: {slice}")]
+    AssignedBlind { slice: Slice },
+    #[error("attempted to mark slice ready which was not pending: {slice}")]
+    NotPending { slice: Slice },
+    #[error("evaluator flush index mismatch: expected {expected:?}, got {actual:?}")]
+    FlushIdx {
+        expected: FlushState,
+        actual: FlushState,
+    },
 }
 
 impl From<KeyStoreError> for GeneratorStoreError {
@@ -336,5 +354,114 @@ impl From<KeyStoreError> for GeneratorStoreError {
 impl From<StoreError> for GeneratorStoreError {
     fn from(err: StoreError) -> Self {
         Self(ErrorRepr::Store(err))
+    }
+}
+
+impl From<DecodeError> for GeneratorStoreError {
+    fn from(err: DecodeError) -> Self {
+        Self(ErrorRepr::Decode(err))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+
+    fn new() -> GeneratorStore {
+        let mut rng = StdRng::seed_from_u64(0);
+        GeneratorStore::new([0; 16], Delta::random(&mut rng))
+    }
+
+    #[test]
+    fn test_gen_store_commit_without_visibility() {
+        let mut store = new();
+        let slice = store.alloc_raw(1).unwrap();
+        let err = store.commit_raw(slice).unwrap_err();
+        matches!(err.0, ErrorRepr::VisibilityNotSet { .. });
+    }
+
+    #[test]
+    fn test_gen_store_commit_without_assign() {
+        let mut store = new();
+        let slice = store.alloc_raw(1).unwrap();
+        store.mark_public_raw(slice).unwrap();
+        let err = store.commit_raw(slice).unwrap_err();
+        matches!(err.0, ErrorRepr::NotAssigned { .. });
+
+        let slice = store.alloc_raw(1).unwrap();
+        store.mark_private_raw(slice).unwrap();
+        let err = store.commit_raw(slice).unwrap_err();
+        matches!(err.0, ErrorRepr::NotAssigned { .. });
+    }
+
+    #[test]
+    fn test_gen_store_commit_twice_is_ok() {
+        let mut store = new();
+        let slice = store.alloc_raw(1).unwrap();
+        store.mark_blind_raw(slice).unwrap();
+        store.commit_raw(slice).unwrap();
+        assert!(store.commit_raw(slice).is_ok());
+    }
+
+    #[test]
+    fn test_gen_store_visibility_already_set() {
+        let mut store = new();
+        let slice = store.alloc_raw(1).unwrap();
+        store.mark_public_raw(slice).unwrap();
+        let err = store.mark_public_raw(slice).unwrap_err();
+        matches!(err.0, ErrorRepr::VisibilityAlreadySet { .. });
+
+        let slice = store.alloc_raw(1).unwrap();
+        store.mark_private_raw(slice).unwrap();
+        let err = store.mark_private_raw(slice).unwrap_err();
+        matches!(err.0, ErrorRepr::VisibilityAlreadySet { .. });
+
+        let slice = store.alloc_raw(1).unwrap();
+        store.mark_blind_raw(slice).unwrap();
+        let err = store.mark_blind_raw(slice).unwrap_err();
+        matches!(err.0, ErrorRepr::VisibilityAlreadySet { .. });
+    }
+
+    #[test]
+    fn test_gen_store_nothing_to_flush() {
+        let mut store = new();
+        assert!(!store.wants_flush());
+    }
+
+    #[test]
+    fn test_gen_store_commit_wants_flush() {
+        let mut store = new();
+        let slice = store.alloc_raw(1).unwrap();
+        store.commit_raw(slice).unwrap();
+        assert!(store.wants_flush());
+    }
+
+    #[test]
+    fn test_gen_store_flush_pending_output() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut store = new();
+        let slice = store.alloc_output(1);
+        _ = store.decode_raw(slice).unwrap();
+
+        assert!(!store.wants_flush());
+
+        store.set_output(slice, &[rng.gen()]).unwrap();
+
+        let (_, flush, _) = store.flush().unwrap();
+
+        assert!(
+            !flush.idx.key_bits.is_empty(),
+            "should want to flush key bits"
+        );
+        assert!(
+            flush.idx.decode.is_empty(),
+            "should not be set until after marked ready"
+        );
+
+        store.mark_output(slice).unwrap();
+
+        assert!(store.wants_flush());
     }
 }

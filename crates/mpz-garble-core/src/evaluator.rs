@@ -2,7 +2,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use cfg_if::cfg_if;
-use mpz_memory_core::correlated::{Key, Mac};
+use mpz_memory_core::correlated::Mac;
 
 use crate::{circuit::EncryptedGate, EncryptedGateBatch, GarbledCircuit, DEFAULT_BATCH_SIZE};
 use mpz_circuits::{
@@ -227,7 +227,8 @@ where
             return Err(EvaluatorError::NotFinished);
         }
 
-        // If there were 0 AND gates in the circuit, we need to evaluate the "free" gates now.
+        // If there were 0 AND gates in the circuit, we need to evaluate the "free"
+        // gates now.
         if !self.complete {
             self.next(Default::default());
         }
@@ -269,7 +270,8 @@ where
         }
     }
 
-    /// Returns the encoded outputs of the circuit, and the hash of the encrypted gates if present.
+    /// Returns the encoded outputs of the circuit, and the hash of the
+    /// encrypted gates if present.
     pub fn finish(self) -> Result<EvaluatorOutput, EvaluatorError> {
         self.0.finish()
     }

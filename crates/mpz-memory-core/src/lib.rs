@@ -1,7 +1,10 @@
 pub mod binary;
 pub mod correlated;
+mod decode;
 pub mod store;
 pub mod view;
+
+pub use decode::{DecodeError, DecodeFuture, DecodeFutureTyped, DecodeOp};
 
 use core::fmt;
 use std::{
@@ -15,11 +18,122 @@ use serde::{Deserialize, Serialize};
 pub(crate) type RangeSet = utils::range::RangeSet<usize>;
 pub(crate) type Range = std::ops::Range<usize>;
 
+/// Virtual-machine memory.
+pub trait Memory<T: MemoryType> {
+    /// Memory error type.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Allocates a new slice of memory.
+    fn alloc_raw(&mut self, size: usize) -> Result<Slice, Self::Error>;
+
+    /// Assigns data to the slice.
+    fn assign_raw(&mut self, slice: Slice, data: T::Raw) -> Result<(), Self::Error>;
+
+    /// Commits the slice of memory.
+    fn commit_raw(&mut self, slice: Slice) -> Result<(), Self::Error>;
+
+    /// Decodes data from memory.
+    ///
+    /// Returns a future which will resolve to the value when it is ready.
+    fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<T::Raw>, Self::Error>;
+}
+
+/// Extension trait for [`Memory`].
+pub trait MemoryExt<T: MemoryType>: Memory<T> {
+    /// Allocates a new value.
+    fn alloc<R>(&mut self) -> Result<R, Self::Error>
+    where
+        R: Repr<T>,
+    {
+        self.alloc_raw(R::SIZE).map(R::from_raw)
+    }
+
+    /// Assigns the value to memory.
+    fn assign<R>(&mut self, value: R, clear: R::Clear) -> Result<(), Self::Error>
+    where
+        R: Repr<T>,
+    {
+        self.assign_raw(value.to_raw(), clear.into_clear())
+    }
+
+    /// Commits the value to memory.
+    fn commit<R>(&mut self, value: R) -> Result<(), Self::Error>
+    where
+        R: Repr<T>,
+    {
+        self.commit_raw(value.to_raw())
+    }
+
+    /// Decodes the value.
+    ///
+    /// Returns a future which will resolve to the value when it is ready.
+    fn decode<R>(&mut self, value: R) -> Result<DecodeFutureTyped<T::Raw, R::Clear>, Self::Error>
+    where
+        R: Repr<T>,
+    {
+        self.decode_raw(value.to_raw())
+            .map(|fut| DecodeFutureTyped::new(fut, <R::Clear as ClearValue<T>>::from_clear))
+    }
+}
+
+impl<T: MemoryType, M> MemoryExt<T> for M where M: Memory<T> {}
+
+/// Two-party memory view.
+pub trait View {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Marks the slice as public.
+    fn mark_public_raw(&mut self, slice: Slice) -> Result<(), Self::Error>;
+
+    /// Marks the slice as private.
+    fn mark_private_raw(&mut self, slice: Slice) -> Result<(), Self::Error>;
+
+    /// Marks the slice as blind.
+    fn mark_blind_raw(&mut self, slice: Slice) -> Result<(), Self::Error>;
+}
+
+/// Extension trait for [`View`].
+pub trait ViewExt: View {
+    /// Marks the value as public.
+    fn mark_public<R>(&mut self, value: R) -> Result<(), Self::Error>
+    where
+        R: ToRaw,
+    {
+        self.mark_public_raw(value.to_raw())
+    }
+
+    /// Marks the value as private.
+    fn mark_private<R>(&mut self, value: R) -> Result<(), Self::Error>
+    where
+        R: ToRaw,
+    {
+        self.mark_private_raw(value.to_raw())
+    }
+
+    /// Marks the value as blind.
+    fn mark_blind<R>(&mut self, value: R) -> Result<(), Self::Error>
+    where
+        R: ToRaw,
+    {
+        self.mark_blind_raw(value.to_raw())
+    }
+}
+
+impl<M> ViewExt for M where M: View {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignKind {
     Public,
     Private,
     Blind,
+}
+
+#[derive(Debug, Clone)]
+pub struct AssignOp {
+    /// Memory slice.
+    pub slice: Slice,
+    /// Assign kind.
+    pub kind: AssignKind,
 }
 
 /// Memory pointer.

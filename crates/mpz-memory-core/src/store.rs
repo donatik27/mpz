@@ -92,7 +92,7 @@ impl<T: Copy> Store<T> {
         let slice = Slice::new_unchecked(ptr, data.len());
 
         self.items.extend_from_slice(data);
-        self.set = self.set.union(&slice.to_range());
+        self.set |= slice.to_range();
 
         slice
     }
@@ -107,7 +107,7 @@ impl<T: Copy> Store<T> {
             return Err(StoreError::InvalidSlice(slice));
         }
 
-        self.set = self.set.union(&range);
+        self.set |= range.clone();
         self.items[range].copy_from_slice(data);
 
         Ok(())
@@ -190,7 +190,7 @@ impl BitStore {
         let slice = Slice::new_unchecked(ptr, data.len());
 
         self.bits.extend_from_bitslice(data);
-        self.set = self.set.union(&slice.to_range());
+        self.set |= slice.to_range();
 
         slice
     }
@@ -205,7 +205,7 @@ impl BitStore {
             return Err(StoreError::InvalidSlice(slice));
         }
 
-        self.set = self.set.union(&range);
+        self.set |= &range;
         self.bits[range].copy_from_bitslice(data);
 
         Ok(())

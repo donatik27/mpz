@@ -18,7 +18,6 @@ members = [
     "crates/mpz-ole-core",
     "crates/mpz-ole",
     "crates/mpz-memory-core",
-    "crates/mpz-vm",
     "crates/mpz-vm-core",
     "crates/mpz-zk-core",
 ]
@@ -47,13 +46,12 @@ mpz-ole = { path = "crates/mpz-ole" }
 mpz-ole-core = { path = "crates/mpz-ole-core" }
 mpz-memory-core = { path = "crates/mpz-memory-core" }
 mpz-memory = { path = "crates/mpz-memory" }
-mpz-vm = { path = "crates/mpz-vm" }
 mpz-vm-core = { path = "crates/mpz-vm-core" }
 clmul = { path = "crates/clmul" }
 matrix-transpose = { path = "crates/matrix-transpose" }
 
-tlsn-utils = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "046125a" }
-tlsn-utils-aio = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "046125a" }
+tlsn-utils = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "5899190" }
+tlsn-utils-aio = { git = "https://github.com/tlsnotary/tlsn-utils", rev = "5899190" }
 
 # rand
 rand_chacha = "0.3"

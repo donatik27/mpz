@@ -70,7 +70,7 @@ impl ProverStore {
         self.mac_store.try_set_public(slice, data)?;
         self.data_store.try_set(slice, data)?;
 
-        self.idx_public = self.idx_public.union(&slice.to_range());
+        self.idx_public |= slice.to_range();
 
         Ok(())
     }

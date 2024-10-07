@@ -1,12 +1,12 @@
 use std::{
     future::Future,
-    ops::Range,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use futures::{channel::oneshot, FutureExt};
-use mpz_memory_core::Slice;
+
+use crate::Slice;
 
 /// Decode operation.
 #[derive(Debug)]

@@ -5,31 +5,29 @@ use hashbrown::HashMap;
 use mpz_circuits::Circuit;
 use mpz_common::{cpu::CpuBackend, scoped, Context};
 use mpz_core::{bitvec::BitVec, Block};
-use mpz_garble_core::{evaluate_garbled_circuits, GarbledCircuit};
-use mpz_memory_core::{binary::Binary, Slice};
-use mpz_ot::COTReceiver;
-use mpz_vm::{
-    Alloc, Assign, Callable, Commit, Decode, Execute, Memory, MemorySync, Preprocess, Synchronize,
-    View, VmError,
+use mpz_garble_core::{
+    evaluate_garbled_circuits,
+    store::{EvaluatorStore, EvaluatorStoreError},
+    GarbledCircuit, Mac,
 };
-use mpz_vm_core::{Call, DecodeFuture};
+use mpz_memory_core::{binary::Binary, DecodeFuture, Memory, Slice};
+use mpz_ot::COTReceiver;
+use mpz_vm_core::{Call, Execute, Vm};
+use serio::{stream::IoStreamExt, SinkExt};
 use utils::{
     filter_drain::FilterDrain,
-    range::{Disjoint, RangeSet, Union},
+    range::{Disjoint, RangeSet},
 };
 
-use crate::{
-    evaluator::{evaluate, receive_garbled_circuit},
-    store::EvaluatorStore,
-};
+use crate::evaluator::{evaluate, receive_garbled_circuit};
 
-type Result<T> = core::result::Result<T, VmError>;
+type Result<T, E = EvaluatorError> = core::result::Result<T, E>;
+type Error = EvaluatorError;
 
 #[derive(Debug)]
 pub struct Evaluator<OT> {
-    store: EvaluatorStore,
     ot: OT,
-
+    store: EvaluatorStore,
     call_stack: Vec<(Call, Slice)>,
     preprocessed: HashMap<Slice, (Call, GarbledCircuit)>,
 }
@@ -38,84 +36,95 @@ impl<OT> Evaluator<OT> {
     /// Creates a new generator.
     pub fn new(ot: OT) -> Self {
         Self {
-            store: EvaluatorStore::default(),
             ot,
+            store: EvaluatorStore::default(),
             call_stack: Vec::new(),
             preprocessed: HashMap::new(),
         }
     }
 }
 
-impl<OT> Memory for Evaluator<OT> {
-    type MemoryType = Binary;
-}
+impl<OT> Memory<Binary> for Evaluator<OT> {
+    type Error = EvaluatorError;
 
-impl<OT> Alloc for Evaluator<OT> {
     fn alloc_raw(&mut self, size: usize) -> Result<Slice> {
-        Ok(self.store.alloc(size))
-    }
-}
-
-impl<OT> View for Evaluator<OT> {
-    fn configure_public_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.configure_public(slice).map_err(VmError::memory)
+        self.store.alloc_raw(size).map_err(Error::from)
     }
 
-    fn configure_private_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.configure_private(slice).map_err(VmError::memory)
+    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.mark_public_raw(slice).map_err(Error::from)
     }
 
-    fn configure_blind_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.configure_blind(slice).map_err(VmError::memory)
+    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.mark_private_raw(slice).map_err(Error::from)
     }
-}
 
-impl<OT> Assign for Evaluator<OT> {
-    fn assign_raw(&mut self, slice: Slice, value: BitVec) -> Result<()> {
-        self.store.assign(slice, &value).map_err(VmError::memory)
+    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
+        self.store.mark_blind_raw(slice).map_err(Error::from)
     }
-}
 
-impl<OT> Commit for Evaluator<OT> {
     fn commit_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.commit(slice).map_err(VmError::memory)
+        self.store.commit_raw(slice).map_err(Error::from)
+    }
+
+    fn assign_raw(&mut self, slice: Slice, value: BitVec) -> Result<()> {
+        self.store.assign_raw(slice, value).map_err(Error::from)
+    }
+
+    fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
+        self.store.decode_raw(slice).map_err(Error::from)
     }
 }
 
-impl<OT> Callable for Evaluator<OT> {
-    fn call(&mut self, call: Call) -> Result<Slice> {
-        let output = self.store.alloc(call.circ().output_len());
+impl<OT> Vm<Binary> for Evaluator<OT> {
+    type Error = Error;
+
+    fn call_raw(&mut self, call: Call) -> std::result::Result<Slice, <Self as Vm<Binary>>::Error> {
+        let output = self.store.alloc_output(call.circ().output_len());
         self.call_stack.push((call, output));
         Ok(output)
     }
 }
 
-impl<OT> Decode for Evaluator<OT> {
-    fn decode_raw(&mut self, raw: Slice) -> Result<DecodeFuture<BitVec>> {
-        self.store.decode(raw).map_err(VmError::memory)
-    }
-}
-
 #[async_trait]
-impl<Ctx, OT> MemorySync<Ctx> for Evaluator<OT>
+impl<Ctx, OT> Execute<Ctx> for Evaluator<OT>
 where
     Ctx: Context,
     OT: COTReceiver<Ctx, bool, Block> + Send,
 {
-    async fn sync_memory(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.store
-            .sync(ctx, &mut self.ot)
-            .await
-            .map_err(VmError::memory)
-    }
-}
+    type Error = Error;
 
-#[async_trait]
-impl<Ctx, OT> Preprocess<Ctx> for Evaluator<OT>
-where
-    Ctx: Context,
-    OT: Send,
-{
+    async fn flush(&mut self, ctx: &mut Ctx) -> Result<()> {
+        while self.store.wants_flush() {
+            let ot = &mut self.ot;
+            let (recv, flush, ot_choices) = self.store.flush()?;
+            if !ot_choices.is_empty() {
+                let (flush, macs) = ctx
+                    .try_join(
+                        scoped!(move |ctx| {
+                            ctx.io_mut().send(flush).await?;
+                            let flush = ctx.io_mut().expect_next().await?;
+                            Ok(flush)
+                        }),
+                        scoped!(move |ctx| {
+                            ot.receive_correlated(ctx, &ot_choices)
+                                .await
+                                .map_err(Error::from)
+                        }),
+                    )
+                    .await??;
+
+                recv.receive(flush, Mac::from_blocks(macs.msgs))?;
+            } else {
+                ctx.io_mut().send(flush).await?;
+                let flush = ctx.io_mut().expect_next().await?;
+                recv.receive(flush, Vec::default())?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<()> {
         while !self.call_stack.is_empty() {
             let mut idx_outputs = RangeSet::default();
@@ -128,7 +137,7 @@ where
                         .iter()
                         .all(|input| input.to_range().is_disjoint(&idx_outputs))
                     {
-                        idx_outputs = idx_outputs.union(&output.to_range());
+                        idx_outputs |= output.to_range();
                         true
                     } else {
                         false
@@ -152,19 +161,13 @@ where
             for (call, output, result) in outputs {
                 let garbled_circuit = result.unwrap();
                 self.preprocessed.insert(output, (call, garbled_circuit));
+                self.store.mark_output(output)?;
             }
         }
 
         Ok(())
     }
-}
 
-#[async_trait]
-impl<Ctx, OT> Execute<Ctx> for Evaluator<OT>
-where
-    Ctx: Context,
-    OT: Send,
-{
     async fn execute(&mut self, ctx: &mut Ctx) -> Result<()> {
         while !self.preprocessed.is_empty() {
             let (output_refs, ready_calls): (Vec<_>, Vec<_>) = self
@@ -198,8 +201,11 @@ where
             for (output_ref, output) in output_refs.into_iter().zip(outputs) {
                 self.store
                     .set_output(output_ref, &output.outputs)
-                    .map_err(VmError::memory)?;
+                    .map_err(Error::from)?;
+                self.store.mark_output(output_ref)?;
             }
+
+            self.store.flush_decode()?;
         }
 
         while !self.call_stack.is_empty() {
@@ -245,25 +251,40 @@ where
                 let output = result.unwrap();
                 self.store
                     .set_output(output_ref, &output.outputs)
-                    .map_err(VmError::memory)?;
+                    .map_err(Error::from)?;
             }
+
+            self.store.flush_decode()?;
         }
 
         Ok(())
     }
 }
 
-#[async_trait]
-impl<Ctx, OT> Synchronize<Ctx> for Evaluator<OT>
-where
-    Ctx: Context,
-    OT: COTReceiver<Ctx, bool, Block> + Send,
-{
-    async fn sync(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.sync_memory(ctx).await?;
-        self.execute(ctx).await?;
-        self.sync_memory(ctx).await?;
+#[derive(Debug, thiserror::Error)]
+#[error("evaluator error")]
+pub struct EvaluatorError {}
 
-        Ok(())
+impl From<EvaluatorStoreError> for EvaluatorError {
+    fn from(value: EvaluatorStoreError) -> Self {
+        todo!()
+    }
+}
+
+impl From<mpz_ot::OTError> for EvaluatorError {
+    fn from(value: mpz_ot::OTError) -> Self {
+        todo!()
+    }
+}
+
+impl From<std::io::Error> for EvaluatorError {
+    fn from(value: std::io::Error) -> Self {
+        todo!()
+    }
+}
+
+impl From<mpz_common::ContextError> for EvaluatorError {
+    fn from(value: mpz_common::ContextError) -> Self {
+        todo!()
     }
 }
