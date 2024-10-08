@@ -288,12 +288,43 @@ pub struct Array<T, const N: usize> {
     _pd: PhantomData<T>,
 }
 
-impl<T, const N: usize> FromRaw for Array<T, N> {
-    fn from_raw(slice: Slice) -> Self {
+impl<T, const N: usize> Array<T, N> {
+    pub(crate) const fn new(slice: Slice) -> Self {
+        assert!(N > 0, "array size must be greater than 0");
+
         Self {
             slice,
             _pd: PhantomData,
         }
+    }
+
+    /// Returns a slice of the array, starting from `start`.
+    ///
+    /// Returns `None` if the slice is out of bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The start index of the slice.
+    pub fn get<const M: usize>(&self, start: usize) -> Option<Array<T, M>> {
+        let range = self.slice.to_range();
+
+        let t_size = range.len() / N;
+        let new_range = range.start + (start * t_size)..range.start + (start * t_size) + M;
+
+        if new_range.is_empty() || new_range.end > range.end {
+            return None;
+        }
+
+        Some(Array {
+            slice: Slice::from_range_unchecked(new_range),
+            _pd: PhantomData,
+        })
+    }
+}
+
+impl<T, const N: usize> FromRaw for Array<T, N> {
+    fn from_raw(slice: Slice) -> Self {
+        Self::new(slice)
     }
 }
 
