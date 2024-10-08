@@ -9,7 +9,7 @@ use mpz_memory_core::{
 use rand::Rng;
 use utils::{
     filter_drain::FilterDrain,
-    range::{Disjoint, Intersection, Subset},
+    range::{Disjoint, Intersection, Subset, Union},
 };
 
 use crate::store::{
@@ -61,7 +61,9 @@ impl GeneratorStore {
 
     /// Returns whether the slice is committed.
     pub fn is_committed(&self, slice: Slice) -> bool {
-        slice.to_range().is_subset(&self.input_state.complete)
+        slice
+            .to_range()
+            .is_subset(&self.input_state.complete.union(&self.output_state.complete))
     }
 
     /// Returns keys if they are set.
