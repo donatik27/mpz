@@ -76,22 +76,44 @@ impl_uint!(u32, U32, 32);
 impl_uint!(u64, U64, 64);
 impl_uint!(u128, U128, 128);
 
-impl<T, U> ClearValue<Binary> for (T, U)
-where
-    T: ClearValue<Binary> + StaticSize<Binary>,
-    U: ClearValue<Binary> + StaticSize<Binary>,
-{
-    fn into_clear(self) -> BitVec {
-        let (a, b) = (self.0.into_clear(), self.1.into_clear());
-        let mut value = BitVec::with_capacity(a.len() + b.len());
-        value.extend_from_bitslice(&a);
-        value.extend_from_bitslice(&b);
-        value
-    }
+macro_rules! impl_clear_value_for_tuples {
+    // Macro for generating implementations for tuples with element identifiers and indices.
+    ($($name:ident : $index:tt),+) => {
+        impl<$($name),+> ClearValue<Binary> for ($($name,)+)
+        where
+            $($name: ClearValue<Binary> + StaticSize<Binary>,)+
+        {
+            fn into_clear(self) -> BitVec {
+                let mut value = BitVec::new();
+                // Extend the BitVec with each tuple element's clear value using the indices
+                $(
+                    value.extend_from_bitslice(&self.$index.into_clear());
+                )+
+                value
+            }
 
-    fn from_clear(value: BitVec) -> Self {
-        let a = T::from_clear(value[..T::SIZE].to_bitvec());
-        let b = U::from_clear(value[T::SIZE..].to_bitvec());
-        (a, b)
-    }
+            #[allow(unused_assignments)]
+            fn from_clear(value: BitVec) -> Self {
+                let mut offset = 0;
+                (
+                    $(
+                        {
+                            let size = $name::SIZE;
+                            let elem = $name::from_clear(value[offset..offset + size].to_bitvec());
+                            offset += size;
+                            elem
+                        },
+                    )+
+                )
+            }
+        }
+    };
 }
+
+impl_clear_value_for_tuples!(T0: 0, T1: 1);
+impl_clear_value_for_tuples!(T0: 0, T1: 1, T2: 2);
+impl_clear_value_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3);
+impl_clear_value_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4);
+impl_clear_value_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4, T5: 5);
+impl_clear_value_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4, T5: 5, T6: 6);
+impl_clear_value_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4, T5: 5, T6: 6, T7: 7);

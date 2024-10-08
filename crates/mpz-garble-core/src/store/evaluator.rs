@@ -309,7 +309,7 @@ impl Memory<Binary> for EvaluatorStore {
     }
 }
 
-impl ViewTrait for EvaluatorStore {
+impl ViewTrait<Binary> for EvaluatorStore {
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {

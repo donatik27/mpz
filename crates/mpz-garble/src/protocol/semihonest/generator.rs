@@ -97,7 +97,7 @@ impl<OT> Memory<Binary> for Generator<OT> {
     }
 }
 
-impl<OT> View for Generator<OT> {
+impl<OT> View<Binary> for Generator<OT> {
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {

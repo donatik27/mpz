@@ -79,7 +79,7 @@ pub trait MemoryExt<T: MemoryType>: Memory<T> {
 impl<T: MemoryType, M> MemoryExt<T> for M where M: Memory<T> {}
 
 /// Two-party memory view.
-pub trait View {
+pub trait View<T: MemoryType> {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Marks the slice as public.
@@ -93,7 +93,7 @@ pub trait View {
 }
 
 /// Extension trait for [`View`].
-pub trait ViewExt: View {
+pub trait ViewExt<T: MemoryType>: View<T> {
     /// Marks the value as public.
     fn mark_public<R>(&mut self, value: R) -> Result<(), Self::Error>
     where
@@ -119,7 +119,12 @@ pub trait ViewExt: View {
     }
 }
 
-impl<M> ViewExt for M where M: View {}
+impl<M, T> ViewExt<T> for M
+where
+    M: View<T>,
+    T: MemoryType,
+{
+}
 
 /// Memory pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -362,53 +367,103 @@ pub struct Vector<T> {
     _pd: PhantomData<T>,
 }
 
-impl<T, U, R> FromRaw<R> for (T, U)
-where
-    T: FromRaw<R> + Repr<R>,
-    U: FromRaw<R> + Repr<R>,
-    R: MemoryType,
-{
-    fn from_raw(slice: Slice) -> Self {
-        let mut t_slice = slice;
-        t_slice.size = T::SIZE;
-        let t = T::from_raw(t_slice);
-
-        let mut u_slice = slice;
-        u_slice.ptr.0 += T::SIZE;
-        u_slice.size = U::SIZE;
-        let u = U::from_raw(u_slice);
-
-        (t, u)
-    }
+macro_rules! impl_from_raw_for_tuples {
+    ($($name:ident),+) => {
+        impl<$($name,)+ R> FromRaw<R> for ($($name,)+)
+        where
+            $($name: FromRaw<R> + StaticSize<R>,)+
+            R: MemoryType,
+        {
+            #[allow(unused_assignments)]
+            fn from_raw(slice: Slice) -> Self {
+                let mut offset = 0;
+                (
+                    $(
+                        {
+                            let mut sub_slice = slice;
+                            sub_slice.ptr.0 += offset;
+                            sub_slice.size = $name::SIZE;
+                            offset += $name::SIZE;
+                            $name::from_raw(sub_slice)
+                        },
+                    )+
+                )
+            }
+        }
+    };
 }
 
-impl<T, U> ToRaw for (T, U)
-where
-    T: ToRaw,
-    U: ToRaw,
-{
-    fn to_raw(&self) -> Slice {
-        let t = self.0.to_raw();
-        let u = self.1.to_raw();
+impl_from_raw_for_tuples!(T0, T1);
+impl_from_raw_for_tuples!(T0, T1, T2);
+impl_from_raw_for_tuples!(T0, T1, T2, T3);
+impl_from_raw_for_tuples!(T0, T1, T2, T3, T4);
+impl_from_raw_for_tuples!(T0, T1, T2, T3, T4, T5);
+impl_from_raw_for_tuples!(T0, T1, T2, T3, T4, T5, T6);
+impl_from_raw_for_tuples!(T0, T1, T2, T3, T4, T5, T6, T7);
 
-        Slice::new_unchecked(t.ptr, t.size + u.size)
-    }
+macro_rules! impl_to_raw_for_tuples {
+    ($($name:ident : $index:tt),+) => {
+        impl<$($name,)+> ToRaw for ($($name,)+)
+        where
+            $($name: ToRaw,)+
+        {
+            #[allow(non_snake_case)]
+            fn to_raw(&self) -> Slice {
+                let mut slice = self.0.to_raw();
+                $(
+                    let next_slice = self.$index.to_raw();
+                    slice.size += next_slice.size;
+                )+
+                slice
+            }
+        }
+    };
 }
 
-impl<T, U, R> StaticSize<R> for (T, U)
-where
-    T: StaticSize<R>,
-    U: StaticSize<R>,
-{
-    const SIZE: usize = T::SIZE + U::SIZE;
+impl_to_raw_for_tuples!(T0: 0, T1: 1);
+impl_to_raw_for_tuples!(T0: 0, T1: 1, T2: 2);
+impl_to_raw_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3);
+impl_to_raw_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4);
+impl_to_raw_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4, T5: 5);
+impl_to_raw_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4, T5: 5, T6: 6);
+impl_to_raw_for_tuples!(T0: 0, T1: 1, T2: 2, T3: 3, T4: 4, T5: 5, T6: 6, T7: 7);
+
+macro_rules! impl_static_size_for_tuples {
+    ($($ident:ident),+) => {
+        impl<$($ident,)+ R> StaticSize<R> for ($($ident,)+)
+        where
+            $($ident: StaticSize<R>,)+
+        {
+            const SIZE: usize = 0 $(+ $ident::SIZE)+;
+        }
+    };
 }
 
-impl<T, U, R> Repr<R> for (T, U)
-where
-    T: Repr<R>,
-    U: Repr<R>,
-    R: MemoryType,
-    (T::Clear, U::Clear): ClearValue<R>,
-{
-    type Clear = (T::Clear, U::Clear);
+impl_static_size_for_tuples!(T0, T1);
+impl_static_size_for_tuples!(T0, T1, T2);
+impl_static_size_for_tuples!(T0, T1, T2, T3);
+impl_static_size_for_tuples!(T0, T1, T2, T3, T4);
+impl_static_size_for_tuples!(T0, T1, T2, T3, T4, T5);
+impl_static_size_for_tuples!(T0, T1, T2, T3, T4, T5, T6);
+impl_static_size_for_tuples!(T0, T1, T2, T3, T4, T5, T6, T7);
+
+macro_rules! impl_repr_for_tuples {
+    ($($ident:ident),+) => {
+        impl<$($ident,)+ R> Repr<R> for ($($ident,)+)
+        where
+            $($ident: Repr<R>,)+
+            R: MemoryType,
+            ($($ident::Clear,)+): ClearValue<R>,
+        {
+            type Clear = ($($ident::Clear,)+);
+        }
+    };
 }
+
+impl_repr_for_tuples!(T0, T1);
+impl_repr_for_tuples!(T0, T1, T2);
+impl_repr_for_tuples!(T0, T1, T2, T3);
+impl_repr_for_tuples!(T0, T1, T2, T3, T4);
+impl_repr_for_tuples!(T0, T1, T2, T3, T4, T5);
+impl_repr_for_tuples!(T0, T1, T2, T3, T4, T5, T6);
+impl_repr_for_tuples!(T0, T1, T2, T3, T4, T5, T6, T7);

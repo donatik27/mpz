@@ -64,7 +64,7 @@ impl<OT> Memory<Binary> for Evaluator<OT> {
     }
 }
 
-impl<OT> View for Evaluator<OT> {
+impl<OT> View<Binary> for Evaluator<OT> {
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {

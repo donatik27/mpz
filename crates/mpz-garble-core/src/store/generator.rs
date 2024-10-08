@@ -302,7 +302,7 @@ impl Memory<Binary> for GeneratorStore {
     }
 }
 
-impl ViewTrait for GeneratorStore {
+impl ViewTrait<Binary> for GeneratorStore {
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
