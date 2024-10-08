@@ -152,13 +152,17 @@ pub trait ToRaw {
     fn to_raw(&self) -> Slice;
 }
 
-pub trait FromRaw {
+pub trait FromRaw<T: MemoryType> {
     /// Creates a new value from a raw memory slice.
     fn from_raw(slice: Slice) -> Self;
 }
 
-pub trait Repr<T: MemoryType>: FromRaw + ToRaw {
+pub trait StaticSize<T> {
+    /// Size of the type.
     const SIZE: usize;
+}
+
+pub trait Repr<T: MemoryType>: FromRaw<T> + ToRaw + StaticSize<T> {
     type Clear: ClearValue<T>;
 }
 
@@ -322,7 +326,7 @@ impl<T, const N: usize> Array<T, N> {
     }
 }
 
-impl<T, const N: usize> FromRaw for Array<T, N> {
+impl<T, const N: usize, R: MemoryType> FromRaw<R> for Array<T, N> {
     fn from_raw(slice: Slice) -> Self {
         Self::new(slice)
     }
@@ -334,13 +338,19 @@ impl<T, const N: usize> ToRaw for Array<T, N> {
     }
 }
 
+impl<T, R, const N: usize> StaticSize<R> for Array<T, N>
+where
+    T: StaticSize<R>,
+{
+    const SIZE: usize = N * T::SIZE;
+}
+
 impl<T, R, const N: usize> Repr<R> for Array<T, N>
 where
     T: Repr<R>,
     R: MemoryType,
     [T::Clear; N]: ClearValue<R>,
 {
-    const SIZE: usize = T::SIZE * N;
     type Clear = [T::Clear; N];
 }
 
@@ -350,4 +360,55 @@ pub struct Vector<T> {
     ptr: Ptr,
     len: usize,
     _pd: PhantomData<T>,
+}
+
+impl<T, U, R> FromRaw<R> for (T, U)
+where
+    T: FromRaw<R> + Repr<R>,
+    U: FromRaw<R> + Repr<R>,
+    R: MemoryType,
+{
+    fn from_raw(slice: Slice) -> Self {
+        let mut t_slice = slice;
+        t_slice.size = T::SIZE;
+        let t = T::from_raw(t_slice);
+
+        let mut u_slice = slice;
+        u_slice.ptr.0 += T::SIZE;
+        u_slice.size = U::SIZE;
+        let u = U::from_raw(u_slice);
+
+        (t, u)
+    }
+}
+
+impl<T, U> ToRaw for (T, U)
+where
+    T: ToRaw,
+    U: ToRaw,
+{
+    fn to_raw(&self) -> Slice {
+        let t = self.0.to_raw();
+        let u = self.1.to_raw();
+
+        Slice::new_unchecked(t.ptr, t.size + u.size)
+    }
+}
+
+impl<T, U, R> StaticSize<R> for (T, U)
+where
+    T: StaticSize<R>,
+    U: StaticSize<R>,
+{
+    const SIZE: usize = T::SIZE + U::SIZE;
+}
+
+impl<T, U, R> Repr<R> for (T, U)
+where
+    T: Repr<R>,
+    U: Repr<R>,
+    R: MemoryType,
+    (T::Clear, U::Clear): ClearValue<R>,
+{
+    type Clear = (T::Clear, U::Clear);
 }
