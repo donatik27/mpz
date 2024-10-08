@@ -1,21 +1,19 @@
 use std::mem;
 
-use mpz_core::{
-    bitvec::{BitSlice, BitVec},
-    Block,
-};
+use mpz_core::bitvec::{BitSlice, BitVec};
 use mpz_memory_core::{
+    binary::Binary,
     correlated::{Mac, MacStore, MacStoreError},
     store::{BitStore, StoreError},
-    AssignKind, Size, Slice,
+    view::View,
+    DecodeError, DecodeFuture, DecodeOp, Memory, Slice, View as ViewTrait,
 };
-use mpz_vm_core::{AssignOp, DecodeFuture, DecodeOp};
 use utils::{
     filter_drain::FilterDrain,
-    range::{Difference, Union},
+    range::{Difference, Disjoint, Intersection},
 };
 
-use crate::store::{AssignPayload, DecodePayload, MacPayload};
+use crate::store::{DecodeState, FlushState, InputState, OutputState, ProverFlush, VerifierFlush};
 
 type Error = ProverStoreError;
 type Result<T> = core::result::Result<T, Error>;
@@ -26,8 +24,12 @@ type RangeSet = utils::range::RangeSet<usize>;
 pub struct ProverStore {
     mac_store: MacStore,
     data_store: BitStore,
-    idx_public: RangeSet,
-    buffer_assign: Vec<(Range, BitVec)>,
+    view: View,
+    input_state: InputState,
+    output_state: OutputState,
+    decode_state: DecodeState,
+    flush_state: FlushState,
+
     buffer_decode: Vec<DecodeOp<BitVec>>,
 }
 
@@ -48,14 +50,8 @@ impl ProverStore {
         self.data_store.is_set(slice)
     }
 
-    pub fn wants_assign(&self) -> bool {
-        !self.buffer_assign.is_empty()
-    }
-
-    pub fn wants_decode(&self) -> bool {
-        self.buffer_decode
-            .iter()
-            .any(|op| self.mac_store.is_set(op.slice))
+    pub fn wants_flush(&mut self) -> bool {
+        todo!()
     }
 
     pub fn try_get_macs(&self, slice: Slice) -> Result<&[Mac]> {
@@ -151,18 +147,153 @@ impl ProverStore {
     }
 }
 
+impl Memory<Binary> for ProverStore {
+    type Error = Error;
+
+    fn alloc_raw(&mut self, size: usize) -> Result<Slice> {
+        self.view.alloc(size);
+        self.mac_store.alloc(size);
+        let slice = self.data_store.alloc(size);
+
+        let range = slice.to_range();
+        self.input_state.uncommitted |= &range;
+        self.input_state.all |= &range;
+
+        Ok(slice)
+    }
+
+    fn assign_raw(&mut self, slice: Slice, data: BitVec) -> Result<()> {
+        if !self.view.is_visible(slice) {
+            return Err(ErrorRepr::AssignedBlind { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            return Err(ErrorRepr::AssignedOutput { slice }.into());
+        }
+
+        self.data_store.try_set(slice, &data)?;
+
+        Ok(())
+    }
+
+    fn commit_raw(&mut self, slice: Slice) -> Result<()> {
+        // Make sure visibility is set.
+        if !self.view.is_set(slice) {
+            return Err(ErrorRepr::VisibilityNotSet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            return Err(ErrorRepr::CommitOutput { slice }.into());
+        }
+
+        let range = slice.to_range();
+
+        // Make sure all visible ranges are assigned.
+        let visible = range.intersection(self.view.visible());
+        for range in visible.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+            if !self.data_store.is_set(slice) {
+                return Err(ErrorRepr::NotAssigned { slice }.into());
+            }
+        }
+
+        self.input_state.uncommitted -= &range;
+        self.input_state.pending |= &range;
+
+        Ok(())
+    }
+
+    fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
+        let (fut, mut op) = DecodeFuture::new(slice);
+
+        // If data is already decoded, send it immediately.
+        if let Ok(data) = self.data_store.try_get(slice) {
+            op.send(data.to_bitvec())?;
+        } else {
+            self.buffer_decode.push(op);
+        }
+
+        self.decode_state.all |= slice.to_range();
+
+        Ok(fut)
+    }
+}
+
+impl ViewTrait for ProverStore {
+    type Error = Error;
+
+    fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            return Err(ErrorRepr::VisibilityOutput { slice }.into());
+        }
+
+        self.view.set_public(slice);
+
+        Ok(())
+    }
+
+    fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
+        if self.view.is_set_any(slice) {
+            return Err(ErrorRepr::VisibilityAlreadySet { slice }.into());
+        } else if !slice.to_range().is_disjoint(&self.output_state.all) {
+            return Err(ErrorRepr::VisibilityOutput { slice }.into());
+        }
+
+        self.view.set_private(slice);
+
+        Ok(())
+    }
+
+    fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
+        todo!("cannot mark blind")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
-#[error("prover store error")]
-pub struct ProverStoreError {}
+#[error(transparent)]
+pub struct ProverStoreError(#[from] ErrorRepr);
+
+#[derive(Debug, thiserror::Error)]
+enum ErrorRepr {
+    #[error(transparent)]
+    MacStore(MacStoreError),
+    #[error(transparent)]
+    Store(StoreError),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("visibility not set for slice: {slice}")]
+    VisibilityNotSet { slice: Slice },
+    #[error("visibility already set for slice: {slice}")]
+    VisibilityAlreadySet { slice: Slice },
+    #[error("attempted to set visibility for output: {slice}")]
+    VisibilityOutput { slice: Slice },
+    #[error("attempted to commit visible memory which is not assigned: {slice}")]
+    NotAssigned { slice: Slice },
+    #[error("attempted to assign to blind memory: {slice}")]
+    AssignedBlind { slice: Slice },
+    #[error("attempted to assign to an output: {slice}")]
+    AssignedOutput { slice: Slice },
+    #[error("attempted to commit output, only inputs can be committed: {slice}")]
+    CommitOutput { slice: Slice },
+    #[error("evaluator flush index mismatch: expected {expected:?}, got {actual:?}")]
+    FlushIdx {
+        expected: FlushState,
+        actual: FlushState,
+    },
+}
 
 impl From<MacStoreError> for ProverStoreError {
     fn from(err: MacStoreError) -> Self {
-        todo!()
+        Self(ErrorRepr::MacStore(err))
     }
 }
 
 impl From<StoreError> for ProverStoreError {
     fn from(err: StoreError) -> Self {
-        todo!()
+        Self(ErrorRepr::Store(err))
+    }
+}
+
+impl From<DecodeError> for ProverStoreError {
+    fn from(err: DecodeError) -> Self {
+        Self(ErrorRepr::Decode(err))
     }
 }

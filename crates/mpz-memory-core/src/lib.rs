@@ -121,21 +121,6 @@ pub trait ViewExt: View {
 
 impl<M> ViewExt for M where M: View {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssignKind {
-    Public,
-    Private,
-    Blind,
-}
-
-#[derive(Debug, Clone)]
-pub struct AssignOp {
-    /// Memory slice.
-    pub slice: Slice,
-    /// Assign kind.
-    pub kind: AssignKind,
-}
-
 /// Memory pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Ptr(usize);

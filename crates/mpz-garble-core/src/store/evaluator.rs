@@ -125,7 +125,10 @@ impl EvaluatorStore {
             None
         };
 
-        let flush = EvaluatorFlush { idx, mac_proof };
+        let flush = EvaluatorFlush {
+            state: idx,
+            mac_proof,
+        };
 
         Ok((ReceiveFlush { store: self }, flush, choices))
     }
@@ -178,7 +181,7 @@ impl ReceiveFlush<'_> {
     /// Receives the MACs from the oblivious transfer.
     pub fn receive(self, flush: GeneratorFlush, ot_macs: Vec<Mac>) -> Result<()> {
         let GeneratorFlush {
-            idx,
+            state: idx,
             macs,
             key_bits,
         } = flush;

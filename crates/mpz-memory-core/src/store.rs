@@ -1,5 +1,5 @@
 use mpz_core::bitvec::{BitSlice, BitVec};
-use utils::range::{Subset, Union};
+use utils::range::Subset;
 
 use crate::{Ptr, Slice};
 

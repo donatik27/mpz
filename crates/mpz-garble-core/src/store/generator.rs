@@ -160,7 +160,7 @@ impl GeneratorStore {
         }
 
         let flush = GeneratorFlush {
-            idx,
+            state: idx,
             macs,
             key_bits,
         };
@@ -191,7 +191,7 @@ impl ReceiveFlush<'_> {
     /// Receives a flush from the evaluator.
     pub fn receive(self, flush: EvaluatorFlush) -> Result<()> {
         let EvaluatorFlush {
-            idx,
+            state: idx,
             mac_proof: macs,
         } = flush;
 
@@ -483,11 +483,11 @@ mod tests {
         let (_, flush, _) = store.flush().unwrap();
 
         assert!(
-            !flush.idx.key_bits.is_empty(),
+            !flush.state.key_bits.is_empty(),
             "should want to flush key bits"
         );
         assert!(
-            flush.idx.decode.is_empty(),
+            flush.state.decode.is_empty(),
             "should not be set until after marked ready"
         );
 

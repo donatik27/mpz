@@ -5,35 +5,64 @@ pub use prover::{ProverStore, ProverStoreError};
 pub use verifier::{VerifierStore, VerifierStoreError};
 
 use blake3::Hash;
-use mpz_core::{bitvec::BitVec, Block};
+use mpz_core::bitvec::BitVec;
 use serde::{Deserialize, Serialize};
 use utils::range::RangeSet;
 
-#[derive(Serialize, Deserialize)]
-#[allow(missing_docs)]
-pub struct AssignPayload {
-    idx: RangeSet<usize>,
+#[derive(Debug, Default)]
+pub struct InputState {
+    /// Ranges which are allocated but not committed.
+    uncommitted: RangeSet<usize>,
+    /// Ranges which are pending commitment.
+    pending: RangeSet<usize>,
+    /// Ranges which are fully committed in both parties views.
+    complete: RangeSet<usize>,
+    /// All input ranges.
+    all: RangeSet<usize>,
+}
+
+#[derive(Debug, Default)]
+pub struct OutputState {
+    /// Output ranges which are allocated but not initialized.
+    uninit: RangeSet<usize>,
+    /// Output ranges which are executed.
+    complete: RangeSet<usize>,
+    /// All output ranges.
+    all: RangeSet<usize>,
+}
+
+#[derive(Debug, Default)]
+pub struct DecodeState {
+    /// Ranges which have already been decoded.
+    complete: RangeSet<usize>,
+    /// All ranges which are to be decoded.
+    all: RangeSet<usize>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FlushState {
+    /// Ranges which the Prover is to commit.
+    commit: RangeSet<usize>,
+    /// Ranges which the Verifier is to prove.
+    prove: RangeSet<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProverFlush {
+    state: FlushState,
     adjust: BitVec,
-}
-
-#[derive(Serialize, Deserialize)]
-#[allow(missing_docs)]
-pub struct DecodePayload {
-    idx: RangeSet<usize>,
-    key_bits: BitVec,
-}
-
-#[derive(Serialize, Deserialize)]
-#[allow(missing_docs)]
-pub struct MacPayload {
-    idx: RangeSet<usize>,
-    bits: BitVec,
+    mac_bits: BitVec,
     proof: Hash,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerifierFlush {
+    state: FlushState,
 }
 
 #[cfg(test)]
 mod tests {
-    use mpz_core::bitvec::{BitSlice, BitVec};
+    use mpz_core::bitvec::BitVec;
     use mpz_memory_core::correlated::{Delta, Key};
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -102,8 +131,8 @@ mod tests {
     //     let a = verifier.alloc(128);
 
     //     verifier
-    //         .assign_public(a, &BitVec::from_iter((0..128).map(|_| rng.gen::<bool>())))
-    //         .unwrap();
+    //         .assign_public(a, &BitVec::from_iter((0..128).map(|_|
+    // rng.gen::<bool>())))         .unwrap();
 
     //     assert!(verifier.wants_assign());
     // }
@@ -136,8 +165,8 @@ mod tests {
     //     let a = prover.alloc(128);
 
     //     prover
-    //         .assign_public(a, &BitVec::from_iter((0..128).map(|_| rng.gen::<bool>())))
-    //         .unwrap();
+    //         .assign_public(a, &BitVec::from_iter((0..128).map(|_|
+    // rng.gen::<bool>())))         .unwrap();
 
     //     assert!(prover.wants_assign());
     // }
@@ -150,8 +179,8 @@ mod tests {
     //     let a = prover.alloc(128);
 
     //     prover
-    //         .assign_private(a, &BitVec::from_iter((0..128).map(|_| rng.gen::<bool>())))
-    //         .unwrap();
+    //         .assign_private(a, &BitVec::from_iter((0..128).map(|_|
+    // rng.gen::<bool>())))         .unwrap();
 
     //     assert!(prover.wants_assign());
     // }

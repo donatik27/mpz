@@ -7,9 +7,8 @@ use mpz_core::{
 use mpz_memory_core::{
     correlated::{Delta, Key, KeyStore, KeyStoreError},
     store::{BitStore, StoreError},
-    AssignKind, Size, Slice,
+    DecodeFuture, DecodeOp, Slice,
 };
-use mpz_vm_core::{AssignOp, DecodeFuture, DecodeOp};
 use utils::filter_drain::FilterDrain;
 
 use crate::store::{AssignPayload, DecodePayload, MacPayload};

@@ -77,8 +77,8 @@ impl FlushState {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(try_from = "validation::GeneratorFlushUnchecked")]
 pub struct GeneratorFlush {
-    /// Flush index.
-    idx: FlushState,
+    /// Flush state.
+    state: FlushState,
     /// MACs sent directly to the evaluator.
     macs: Vec<Mac>,
     /// Key bits for decoding.
@@ -89,8 +89,8 @@ pub struct GeneratorFlush {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(try_from = "validation::EvaluatorFlushUnchecked")]
 pub struct EvaluatorFlush {
-    /// Flush index.
-    idx: FlushState,
+    /// Flush state.
+    state: FlushState,
     /// Proof of MACs for decoding.
     mac_proof: Option<MacProof>,
 }
@@ -130,7 +130,7 @@ mod validation {
             }
 
             Ok(GeneratorFlush {
-                idx,
+                state: idx,
                 macs,
                 key_bits,
             })
@@ -154,7 +154,7 @@ mod validation {
             }
 
             Ok(EvaluatorFlush {
-                idx,
+                state: idx,
                 mac_proof: macs,
             })
         }
