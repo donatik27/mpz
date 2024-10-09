@@ -8,7 +8,7 @@ use mpz_memory_core::correlated::Mac;
 
 type Result<T> = core::result::Result<T, ProverError>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Prover {
     buffer: Vec<Mac>,
     check: Check,
@@ -162,7 +162,7 @@ where
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Check {
     transcript: Hasher,
     macs: Vec<[Block; 3]>,

@@ -10,7 +10,7 @@ use mpz_memory_core::{
 };
 use utils::{
     filter_drain::FilterDrain,
-    range::{Difference, Disjoint, Intersection},
+    range::{Difference, Disjoint, Intersection, Subset},
 };
 
 use crate::store::{DecodeState, FlushState, InputState, OutputState, ProverFlush, VerifierFlush};
@@ -23,23 +23,17 @@ type RangeSet = utils::range::RangeSet<usize>;
 #[derive(Debug, Default)]
 pub struct ProverStore {
     mac_store: MacStore,
+    mask_store: BitStore,
     data_store: BitStore,
     view: View,
     input_state: InputState,
     output_state: OutputState,
     decode_state: DecodeState,
     flush_state: FlushState,
-
     buffer_decode: Vec<DecodeOp<BitVec>>,
 }
 
 impl ProverStore {
-    /// Allocates uninitialized memory.
-    pub fn alloc(&mut self, len: usize) -> Slice {
-        self.mac_store.alloc(len);
-        self.data_store.alloc(len)
-    }
-
     /// Returns whether the MACs are set for a slice.
     pub fn is_set_macs(&self, slice: Slice) -> bool {
         self.mac_store.is_set(slice)
@@ -50,100 +44,114 @@ impl ProverStore {
         self.data_store.is_set(slice)
     }
 
-    pub fn wants_flush(&mut self) -> bool {
-        todo!()
+    /// Returns whether the data is committed.
+    pub fn is_committed(&self, slice: Slice) -> bool {
+        slice.to_range().is_subset(&self.input_state.complete)
     }
 
     pub fn try_get_macs(&self, slice: Slice) -> Result<&[Mac]> {
         self.mac_store.try_get(slice).map_err(Error::from)
     }
 
-    pub fn set_macs(&mut self, slice: Slice, macs: &[Mac]) -> Result<()> {
+    /// Sets the MACs for input data.
+    pub fn set_input_macs(
+        &mut self,
+        slice: Slice,
+        mask_bits: &BitSlice,
+        macs: &[Mac],
+    ) -> Result<()> {
+        self.mac_store.try_set(slice, macs)?;
+        self.mask_store.try_set(slice, mask_bits)?;
+
+        Ok(())
+    }
+
+    pub fn set_output_macs(&mut self, slice: Slice, macs: &[Mac]) -> Result<()> {
         self.mac_store.try_set(slice, macs).map_err(Error::from)
     }
 
-    pub fn assign_public(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
-        self.mac_store.try_set_public(slice, data)?;
-        self.data_store.try_set(slice, data)?;
+    pub fn wants_flush(&mut self) -> bool {
+        let wants_decode =
+            (self.decode_state.all.clone() - &self.decode_state.complete) - self.view.public();
 
-        self.idx_public |= slice.to_range();
+        self.flush_state.commit = self.input_state.pending.clone() - self.view.public();
+        self.flush_state.prove = (self.input_state.complete.clone()
+            // Can commit and prove simulatenously.
+            | &self.flush_state.commit
+            | &self.output_state.complete)
+            & wants_decode;
 
-        Ok(())
+        !self.flush_state.is_empty()
     }
 
-    pub fn assign_private(
-        &mut self,
-        slice: Slice,
-        data: &BitSlice,
-        masks: &BitSlice,
-        macs: &[Mac],
-    ) -> Result<()> {
-        self.data_store.try_set(slice, data)?;
-        self.mac_store.try_set(slice, macs)?;
-        self.mac_store.adjust(slice, data)?;
+    pub fn flush(&mut self) -> Result<(ReceiveFlush<'_>, ProverFlush)> {
+        let mut adjust = BitVec::with_capacity(self.flush_state.commit.len());
+        let mut i = 0;
+        for range in self.flush_state.commit.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
 
-        let mut adjust = masks.to_bitvec();
-        adjust ^= data;
+            let data = self.data_store.try_get(slice)?;
+            self.mac_store.adjust(slice, data)?;
 
-        self.buffer_assign.push((slice.to_range(), adjust));
+            adjust.extend_from_bitslice(data);
 
-        Ok(())
-    }
+            // Apply masks to the data.
+            let masks = self.mask_store.try_get(slice)?;
+            adjust[i..i + slice.len()] ^= masks;
 
-    pub fn decode(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
-        let (fut, op) = DecodeFuture::new(slice);
-
-        self.buffer_decode.push(op);
-
-        Ok(fut)
-    }
-
-    /// Executes assignment operations.
-    ///
-    /// Returns payload to send to the verifier.
-    pub fn execute_assign(&mut self) -> Result<AssignPayload> {
-        let mut ops = mem::take(&mut self.buffer_assign);
-        ops.sort_by_key(|(range, _)| range.start);
-
-        let mut idx = Vec::new();
-        let mut adjust = BitVec::new();
-        for (range, adjust_) in ops {
-            idx.push(range);
-            adjust.extend_from_bitslice(&adjust_);
+            i += slice.len();
         }
 
-        Ok(AssignPayload {
-            idx: RangeSet::from(idx),
+        let (mac_bits, proof) = self.mac_store.prove(&self.flush_state.prove)?;
+
+        let flush = ProverFlush {
+            state: self.flush_state.clone(),
             adjust,
-        })
+            mac_bits,
+            proof,
+        };
+
+        Ok((ReceiveFlush { store: self }, flush))
     }
 
-    /// Executes ready decode operations.
-    ///
-    /// Returns MAC proof to send to the verifier.
-    pub fn execute_decode(&mut self) -> Result<MacPayload> {
-        let mut idx = RangeSet::from(
-            self.buffer_decode
-                .filter_drain(|op| {
-                    if let Ok(data) = self.data_store.try_get(op.slice) {
-                        op.send(data.to_bitvec())
-                            .expect("channel should not be closed");
+    fn flush_decode(&mut self) -> Result<()> {
+        for mut op in self
+            .buffer_decode
+            .filter_drain(|op| self.data_store.is_set(op.slice))
+        {
+            let data = self.data_store.try_get(op.slice)?;
+            op.send(data.to_bitvec())?;
+        }
 
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .map(|op| op.slice.to_range())
-                .collect::<Vec<_>>(),
-        );
+        Ok(())
+    }
+}
 
-        // Only prove the private indices.
-        idx = idx.difference(&self.idx_public);
+#[must_use]
+pub struct ReceiveFlush<'a> {
+    store: &'a mut ProverStore,
+}
 
-        let (bits, proof) = self.mac_store.prove(&idx)?;
+impl ReceiveFlush<'_> {
+    pub fn receive(self, flush: VerifierFlush) -> Result<()> {
+        let VerifierFlush { state } = flush;
 
-        Ok(MacPayload { idx, bits, proof })
+        if state != self.store.flush_state {
+            return Err(ErrorRepr::FlushState {
+                expected: self.store.flush_state.clone(),
+                actual: state,
+            }
+            .into());
+        }
+
+        self.store.input_state.pending -= &state.commit;
+        self.store.input_state.complete |= &state.commit;
+        self.store.decode_state.complete |= &state.prove;
+
+        self.store.flush_state.clear();
+        self.store.flush_decode()?;
+
+        Ok(())
     }
 }
 
@@ -153,6 +161,7 @@ impl Memory<Binary> for ProverStore {
     fn alloc_raw(&mut self, size: usize) -> Result<Slice> {
         self.view.alloc(size);
         self.mac_store.alloc(size);
+        self.mask_store.alloc(size);
         let slice = self.data_store.alloc(size);
 
         let range = slice.to_range();
@@ -215,7 +224,7 @@ impl Memory<Binary> for ProverStore {
     }
 }
 
-impl ViewTrait for ProverStore {
+impl ViewTrait<Binary> for ProverStore {
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
@@ -273,8 +282,8 @@ enum ErrorRepr {
     AssignedOutput { slice: Slice },
     #[error("attempted to commit output, only inputs can be committed: {slice}")]
     CommitOutput { slice: Slice },
-    #[error("evaluator flush index mismatch: expected {expected:?}, got {actual:?}")]
-    FlushIdx {
+    #[error("verifier flush state mismatch: expected {expected:?}, got {actual:?}")]
+    FlushState {
         expected: FlushState,
         actual: FlushState,
     },

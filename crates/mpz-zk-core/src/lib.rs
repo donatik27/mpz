@@ -1,5 +1,5 @@
 mod prover;
-mod store;
+pub mod store;
 mod verifier;
 
 pub use prover::{Prover, ProverError};

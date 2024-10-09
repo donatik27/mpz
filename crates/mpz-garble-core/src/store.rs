@@ -69,7 +69,10 @@ impl FlushState {
 
     /// Clears the flush state.
     pub fn clear(&mut self) {
-        std::mem::take(self);
+        self.macs.clear();
+        self.ot.clear();
+        self.key_bits.clear();
+        self.decode.clear();
     }
 }
 
