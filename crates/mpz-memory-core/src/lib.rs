@@ -43,9 +43,20 @@ pub trait MemoryExt<T: MemoryType>: Memory<T> {
     /// Allocates a new value.
     fn alloc<R>(&mut self) -> Result<R, Self::Error>
     where
-        R: Repr<T>,
+        R: Repr<T> + StaticSize<T>,
     {
         self.alloc_raw(R::SIZE).map(R::from_raw)
+    }
+
+    /// Allocates a vector.
+    fn alloc_vec<R>(&mut self, len: usize) -> Result<Vector<R>, Self::Error>
+    where
+        R: Repr<T> + StaticSize<T>,
+    {
+        let size = R::SIZE * len;
+        let slice = self.alloc_raw(size)?;
+
+        Ok(Vector::from_raw(slice))
     }
 
     /// Assigns the value to memory.
@@ -167,7 +178,7 @@ pub trait StaticSize<T> {
     const SIZE: usize;
 }
 
-pub trait Repr<T: MemoryType>: FromRaw<T> + ToRaw + StaticSize<T> {
+pub trait Repr<T: MemoryType>: FromRaw<T> + ToRaw {
     type Clear: ClearValue<T>;
 }
 
@@ -363,8 +374,68 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vector<T> {
     ptr: Ptr,
+    item_size: usize,
     len: usize,
     _pd: PhantomData<T>,
+}
+
+impl<T, R: MemoryType> FromRaw<R> for Vector<T>
+where
+    T: StaticSize<R>,
+{
+    fn from_raw(slice: Slice) -> Self {
+        debug_assert!(slice.size % T::SIZE == 0);
+
+        Self {
+            ptr: slice.ptr,
+            item_size: T::SIZE,
+            len: slice.size / T::SIZE,
+            _pd: PhantomData,
+        }
+    }
+}
+
+impl<T> ToRaw for Vector<T> {
+    fn to_raw(&self) -> Slice {
+        Slice {
+            ptr: self.ptr,
+            size: self.item_size * self.len,
+        }
+    }
+}
+
+impl<T, R> Repr<R> for Vector<T>
+where
+    T: Repr<R> + StaticSize<R>,
+    R: MemoryType,
+    Vec<T::Clear>: ClearValue<R>,
+{
+    type Clear = Vec<T::Clear>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("vector can not be converted to array: expected {expected} elements, got {actual}")]
+pub struct TryFromVectorError {
+    expected: usize,
+    actual: usize,
+}
+
+impl<T, const N: usize> TryFrom<Vector<T>> for Array<T, N> {
+    type Error = TryFromVectorError;
+
+    fn try_from(value: Vector<T>) -> Result<Self, Self::Error> {
+        if value.len != N {
+            return Err(TryFromVectorError {
+                expected: N,
+                actual: value.len,
+            });
+        }
+
+        Ok(Self::new(Slice {
+            ptr: value.ptr,
+            size: value.item_size * N,
+        }))
+    }
 }
 
 macro_rules! impl_from_raw_for_tuples {
@@ -451,7 +522,7 @@ macro_rules! impl_repr_for_tuples {
     ($($ident:ident),+) => {
         impl<$($ident,)+ R> Repr<R> for ($($ident,)+)
         where
-            $($ident: Repr<R>,)+
+            $($ident: Repr<R> + StaticSize<R>,)+
             R: MemoryType,
             ($($ident::Clear,)+): ClearValue<R>,
         {
