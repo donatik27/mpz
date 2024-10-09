@@ -1,20 +1,19 @@
 use async_trait::async_trait;
 
 use itybity::BitIterable;
-use mpz_cointoss as cointoss;
 use mpz_common::Context;
 use mpz_core::Block;
-use mpz_ot_core::chou_orlandi::msgs::SenderPayload;
 use mpz_ot_core::chou_orlandi::{
-    receiver_state as state, Receiver as ReceiverCore, ReceiverConfig,
+    msgs::SenderPayload, receiver_state as state, Receiver as ReceiverCore, ReceiverConfig,
 };
 
 use enum_try_as_inner::EnumTryAsInner;
-use rand::{thread_rng, Rng};
+use rand::Rng;
+use rand_core::OsRng;
 use serio::{stream::IoStreamExt as _, SinkExt as _};
 use utils_aio::non_blocking_backend::{Backend, NonBlockingBackend};
 
-use crate::{CommittedOTReceiver, OTError, OTReceiver, OTReceiverOutput, OTSetup};
+use crate::{OTError, OTReceiver, OTReceiverOutput, OTSetup};
 
 use super::ReceiverError;
 
@@ -26,7 +25,6 @@ pub(crate) enum State {
         seed: Option<[u8; 32]>,
     },
     Setup(Box<ReceiverCore<state::Setup>>),
-    Complete,
     Error,
 }
 
@@ -34,7 +32,6 @@ pub(crate) enum State {
 #[derive(Debug)]
 pub struct Receiver {
     state: State,
-    cointoss_sender: Option<cointoss::Sender<cointoss::sender_state::Received>>,
 }
 
 impl Default for Receiver {
@@ -44,7 +41,6 @@ impl Default for Receiver {
                 config: ReceiverConfig::default(),
                 seed: None,
             },
-            cointoss_sender: None,
         }
     }
 }
@@ -58,7 +54,6 @@ impl Receiver {
     pub fn new(config: ReceiverConfig) -> Self {
         Self {
             state: State::Initialized { config, seed: None },
-            cointoss_sender: None,
         }
     }
 
@@ -74,7 +69,6 @@ impl Receiver {
                 config,
                 seed: Some(seed),
             },
-            cointoss_sender: None,
         }
     }
 }
@@ -90,35 +84,7 @@ impl<Ctx: Context> OTSetup<Ctx> for Receiver {
             .try_into_initialized()
             .map_err(ReceiverError::from)?;
 
-        // If the receiver is committed, we generate the seed using a cointoss.
-        let seed = if config.receiver_commit() {
-            if seed.is_some() {
-                return Err(ReceiverError::InvalidConfig(
-                    "committed receiver seed must be generated using coin toss".to_string(),
-                ))?;
-            }
-
-            let cointoss_seed = thread_rng().gen();
-            let (seeds, cointoss_sender) = cointoss::Sender::new(vec![cointoss_seed])
-                .commit(ctx)
-                .await
-                .map_err(ReceiverError::from)?
-                .receive(ctx)
-                .await
-                .map_err(ReceiverError::from)?;
-
-            self.cointoss_sender = Some(cointoss_sender);
-
-            let seed = seeds[0].to_bytes();
-            // Stretch seed to 32 bytes
-            let mut stretched_seed = [0u8; 32];
-            stretched_seed[..16].copy_from_slice(&seed);
-            stretched_seed[16..].copy_from_slice(&seed);
-
-            stretched_seed
-        } else {
-            seed.unwrap_or_else(|| thread_rng().gen())
-        };
+        let seed = seed.unwrap_or_else(|| OsRng.gen());
 
         let sender_setup = ctx.io_mut().expect_next().await?;
         let receiver =
@@ -169,33 +135,5 @@ where
         self.state = State::Setup(receiver);
 
         Ok(OTReceiverOutput { id, msgs })
-    }
-}
-
-#[async_trait]
-impl<Ctx: Context> CommittedOTReceiver<Ctx, bool, Block> for Receiver {
-    async fn reveal_choices(&mut self, ctx: &mut Ctx) -> Result<(), OTError> {
-        let receiver = std::mem::replace(&mut self.state, State::Error)
-            .try_into_setup()
-            .map_err(ReceiverError::from)?;
-
-        let Some(cointoss_sender) = self.cointoss_sender.take() else {
-            return Err(ReceiverError::InvalidConfig(
-                "receiver not configured to commit".to_string(),
-            )
-            .into());
-        };
-
-        cointoss_sender
-            .finalize(ctx)
-            .await
-            .map_err(ReceiverError::from)?;
-
-        let reveal = receiver.reveal_choices().map_err(ReceiverError::from)?;
-        ctx.io_mut().send(reveal).await?;
-
-        self.state = State::Complete;
-
-        Ok(())
     }
 }

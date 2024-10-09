@@ -1,11 +1,5 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
 use crate::{
     kos::{
-        error::ReceiverVerifyError,
         msgs::{Check, Ciphertexts, Extend, SenderPayload},
         Aes128Ctr, ReceiverConfig, ReceiverError, Rng, RngSeed, CSP, SSP,
     },
@@ -13,10 +7,9 @@ use crate::{
     TransferId,
 };
 
-use itybity::{FromBitIterator, IntoBits, ToBits};
+use itybity::{FromBitIterator, IntoBits};
 use mpz_core::{aes::FIXED_KEY_AES, Block};
 
-use blake3::Hasher;
 use cipher::{KeyIvInit, StreamCipher};
 use rand::{thread_rng, Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -24,11 +17,6 @@ use rand_core::RngCore;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
-
-#[derive(Debug, Default)]
-struct Tape {
-    records: HashMap<TransferId, PayloadRecordNoDelta>,
-}
 
 /// KOS15 receiver.
 #[derive(Debug, Default)]
@@ -54,15 +42,9 @@ impl Receiver {
     ///
     /// * `config` - The Receiver's configuration
     pub fn new(config: ReceiverConfig) -> Self {
-        let tape = if config.sender_commit() {
-            Some(Default::default())
-        } else {
-            None
-        };
-
         Receiver {
             config,
-            state: state::Initialized { tape },
+            state: state::Initialized {},
         }
     }
 
@@ -99,7 +81,6 @@ impl Receiver {
                 extended: false,
                 unchecked_ts: Vec::default(),
                 unchecked_choices: Vec::default(),
-                tape: self.state.tape,
             },
         }
     }
@@ -118,7 +99,8 @@ impl Receiver<state::Extension> {
 
     /// Perform the IKNP OT extension.
     ///
-    /// The provided count _must_ be a multiple of 64, otherwise an error will be returned.
+    /// The provided count _must_ be a multiple of 64, otherwise an error will
+    /// be returned.
     ///
     /// # Sacrificial OTs
     ///
@@ -127,11 +109,12 @@ impl Receiver<state::Extension> {
     ///
     /// # Streaming
     ///
-    /// Extension can be performed in a streaming fashion by calling this method multiple times, sending
-    /// the `Extend` messages to the sender in-between calls.
+    /// Extension can be performed in a streaming fashion by calling this method
+    /// multiple times, sending the `Extend` messages to the sender
+    /// in-between calls.
     ///
-    /// The freshly extended OTs are not available until after the consistency check has been
-    /// performed. See [`Receiver::check`].
+    /// The freshly extended OTs are not available until after the consistency
+    /// check has been performed. See [`Receiver::check`].
     ///
     /// # Arguments
     ///
@@ -209,14 +192,15 @@ impl Receiver<state::Extension> {
     ///
     /// # Sacrificial OTs
     ///
-    /// Performing this check sacrifices 256 OTs for the consistency check, so be sure to
-    /// extend enough OTs to compensate for this.
+    /// Performing this check sacrifices 256 OTs for the consistency check, so
+    /// be sure to extend enough OTs to compensate for this.
     ///
     /// # ⚠️ Warning ⚠️
     ///
-    /// The provided seed must be unbiased! It should be generated using a secure
-    /// coin-toss protocol **after** the receiver has sent their setup message, ie
-    /// after they have already committed to their choice vectors.
+    /// The provided seed must be unbiased! It should be generated using a
+    /// secure coin-toss protocol **after** the receiver has sent their
+    /// setup message, ie after they have already committed to their choice
+    /// vectors.
     ///
     /// # Arguments
     ///
@@ -306,11 +290,6 @@ impl Receiver<state::Extension> {
         self.state.keys.extend(keys);
         self.state.choices.extend(unchecked_choices);
 
-        // If we're recording, we track `ts` too
-        if self.state.tape.is_some() {
-            self.state.ts.extend(unchecked_ts);
-        }
-
         // Disable any further extensions.
         self.state.extended = true;
 
@@ -331,81 +310,11 @@ impl Receiver<state::Extension> {
         }
 
         let id = self.state.transfer_id.next();
-        let index = self.state.index - self.state.keys.len();
 
         Ok(ReceiverKeys {
             id,
-            index,
             keys: self.state.keys.drain(..count).collect(),
             choices: self.state.choices.drain(..count).collect(),
-            ts: if self.state.tape.is_some() {
-                Some(self.state.ts.drain(..count).collect())
-            } else {
-                None
-            },
-            tape: self.state.tape.clone(),
-        })
-    }
-
-    /// Enters the verification state for verifiable OT.
-    ///
-    /// # ⚠️ Warning ⚠️
-    ///
-    /// The authenticity of `delta` must be established outside the context of this function. This
-    /// can be achieved using verifiable base OT.
-    ///
-    /// # Arguments
-    ///
-    /// * `delta` - The sender's base OT choice bits.
-    pub fn start_verification(
-        mut self,
-        delta: Block,
-    ) -> Result<Receiver<state::Verify>, ReceiverError> {
-        let Some(tape) = self.state.tape.take() else {
-            return Err(ReceiverVerifyError::TapeNotRecorded)?;
-        };
-
-        Ok(Receiver {
-            config: self.config,
-            state: state::Verify { tape, delta },
-        })
-    }
-}
-
-impl Receiver<state::Verify> {
-    /// Returns the [`PayloadRecord`] for the given transfer id if it exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the record does not exist.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The transfer id
-    pub fn remove_record(&self, id: TransferId) -> Result<PayloadRecord, ReceiverError> {
-        let PayloadRecordNoDelta {
-            index,
-            choices,
-            ts,
-            keys,
-            ciphertext_digest,
-        } = self
-            .state
-            .tape
-            .lock()
-            .unwrap()
-            .records
-            .remove(&id)
-            .ok_or(ReceiverVerifyError::InvalidTransferId(id))
-            .map_err(ReceiverError::from)?;
-
-        Ok(PayloadRecord {
-            index,
-            choices,
-            ts,
-            keys,
-            delta: self.state.delta,
-            ciphertext_digest,
         })
     }
 }
@@ -418,18 +327,11 @@ impl Receiver<state::Verify> {
 pub struct ReceiverKeys {
     /// Transfer ID
     id: TransferId,
-    /// Start index of the OTs
-    index: usize,
     /// Decryption keys
     keys: Vec<Block>,
-    /// The Receiver's choices. If derandomization is performed, these are the overwritten
-    /// with the derandomized choices.
+    /// The Receiver's choices. If derandomization is performed, these are the
+    /// overwritten with the derandomized choices.
     choices: Vec<bool>,
-
-    /// Receiver `ts`
-    ts: Option<Vec<Block>>,
-    /// Receiver tape
-    tape: Option<Arc<Mutex<Tape>>>,
 }
 
 opaque_debug::implement!(ReceiverKeys);
@@ -466,7 +368,7 @@ impl ReceiverKeys {
     }
 
     /// Decrypts the sender's payload.
-    pub fn decrypt_blocks(mut self, payload: SenderPayload) -> Result<Vec<Block>, ReceiverError> {
+    pub fn decrypt_blocks(self, payload: SenderPayload) -> Result<Vec<Block>, ReceiverError> {
         let SenderPayload { id, ciphertexts } = payload;
 
         let Ciphertexts::Blocks { ciphertexts } = ciphertexts else {
@@ -486,26 +388,6 @@ impl ReceiverKeys {
             ));
         }
 
-        if let Some(tape) = self.tape.take() {
-            let ts = self.ts.take().expect("ts set if tape is set");
-
-            let mut hasher = Hasher::default();
-            ciphertexts.iter().for_each(|ct| {
-                hasher.update(&ct.to_bytes());
-            });
-
-            tape.lock().unwrap().records.insert(
-                id,
-                PayloadRecordNoDelta {
-                    index: self.index,
-                    choices: Vec::from_lsb0_iter(self.choices.iter().copied()),
-                    ts,
-                    keys: self.keys.clone(),
-                    ciphertext_digest: hasher.finalize().into(),
-                },
-            );
-        }
-
         Ok(self
             .keys
             .into_iter()
@@ -519,8 +401,8 @@ impl ReceiverKeys {
     ///
     /// # Verifiable OT
     ///
-    /// Verifiable OT with KOS does not currently support byte payloads, so no record of this payload
-    /// will be recorded.
+    /// Verifiable OT with KOS does not currently support byte payloads, so no
+    /// record of this payload will be recorded.
     pub fn decrypt_bytes<const N: usize>(
         self,
         payload: SenderPayload,
@@ -590,86 +472,6 @@ impl ReceiverKeys {
     }
 }
 
-struct PayloadRecordNoDelta {
-    /// The starting index for the corresponding OTs. This is used to compute the
-    /// "tweak" for the randomization.
-    index: usize,
-    /// The receiver's choices for the transfer.
-    choices: Vec<u8>,
-    ts: Vec<Block>,
-    keys: Vec<Block>,
-    ciphertext_digest: [u8; 32],
-}
-
-opaque_debug::implement!(PayloadRecordNoDelta);
-
-/// A record of a transfer's payload.
-pub struct PayloadRecord {
-    /// The starting index for the corresponding OTs. This is used to compute the
-    /// "tweak" for the randomization.
-    index: usize,
-    /// The receiver's choices for the transfer.
-    choices: Vec<u8>,
-    ts: Vec<Block>,
-    keys: Vec<Block>,
-    /// The sender's base OT choice bits.
-    delta: Block,
-    ciphertext_digest: [u8; 32],
-}
-
-opaque_debug::implement!(PayloadRecord);
-
-impl PayloadRecord {
-    /// Checks the purported messages against the record
-    ///
-    /// # Arguments
-    ///
-    /// * `purported_msgs` - The purported messages sent by the sender.
-    pub fn verify(self, purported_msgs: &[[Block; 2]]) -> Result<(), ReceiverError> {
-        let PayloadRecord {
-            index: counter,
-            choices,
-            ts,
-            keys,
-            delta,
-            ciphertext_digest,
-        } = self;
-
-        // Here we compute the complementary key to the one used earlier in the protocol.
-        //
-        // From this, we encrypt the purported messages and check that the ciphertext digests match.
-        let cipher = &(*FIXED_KEY_AES);
-        let mut hasher = Hasher::default();
-        for (j, (((c, t), key), msgs)) in choices
-            .iter_lsb0()
-            .zip(ts)
-            .zip(keys)
-            .zip(purported_msgs)
-            .enumerate()
-        {
-            let j = Block::new(((counter + j) as u128).to_be_bytes());
-            let key_ = cipher.tccr(j, t ^ delta);
-
-            let (ct0, ct1) = if c {
-                (msgs[0] ^ key_, msgs[1] ^ key)
-            } else {
-                (msgs[0] ^ key, msgs[1] ^ key_)
-            };
-
-            hasher.update(&ct0.to_bytes());
-            hasher.update(&ct1.to_bytes());
-        }
-
-        let digest: [u8; 32] = hasher.finalize().into();
-
-        if ciphertext_digest != digest {
-            return Err(ReceiverVerifyError::InconsistentPayload)?;
-        }
-
-        Ok(())
-    }
-}
-
 /// The receiver's state.
 pub mod state {
     use super::*;
@@ -679,7 +481,6 @@ pub mod state {
 
         impl Sealed for super::Initialized {}
         impl Sealed for super::Extension {}
-        impl Sealed for super::Verify {}
     }
 
     /// The receiver's state.
@@ -687,10 +488,7 @@ pub mod state {
 
     /// The receiver's initial state.
     #[derive(Default)]
-    pub struct Initialized {
-        /// Protocol tape
-        pub(super) tape: Option<Arc<Mutex<Tape>>>,
-    }
+    pub struct Initialized {}
 
     impl State for Initialized {}
 
@@ -698,8 +496,8 @@ pub mod state {
 
     /// The receiver's state after the setup phase.
     ///
-    /// In this state the receiver performs OT extension (potentially multiple times). Also in this
-    /// state the receiver sends OT requests.
+    /// In this state the receiver performs OT extension (potentially multiple
+    /// times). Also in this state the receiver sends OT requests.
     pub struct Extension {
         /// Receiver's rngs
         pub(super) rngs: Vec<[ChaCha20Rng; 2]>,
@@ -723,24 +521,9 @@ pub mod state {
         pub(super) unchecked_ts: Vec<Block>,
         /// Receiver's unchecked choices
         pub(super) unchecked_choices: Vec<bool>,
-
-        /// Protocol tape
-        pub(super) tape: Option<Arc<Mutex<Tape>>>,
     }
 
     impl State for Extension {}
 
     opaque_debug::implement!(Extension);
-
-    /// The receiver's state after receiving the sender's base OT choice bits, a.k.a delta.
-    pub struct Verify {
-        /// Protocol tape
-        pub(super) tape: Arc<Mutex<Tape>>,
-        /// The sender's base OT choice bits.
-        pub(super) delta: Block,
-    }
-
-    impl State for Verify {}
-
-    opaque_debug::implement!(Verify);
 }

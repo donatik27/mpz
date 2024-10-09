@@ -30,10 +30,3 @@ pub struct ReceiverPayload {
     /// The receiver's blinded choices.
     pub blinded_choices: Vec<RistrettoPoint>,
 }
-
-/// Receiver reveal message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiverReveal {
-    /// The receiver's choices.
-    pub choices: Vec<u8>,
-}

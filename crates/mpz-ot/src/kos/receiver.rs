@@ -1,10 +1,9 @@
 use std::mem;
 
 use async_trait::async_trait;
-use futures::TryFutureExt as _;
-use itybity::{FromBitIterator, IntoBitIterator};
+use itybity::IntoBitIterator;
 use mpz_cointoss as cointoss;
-use mpz_common::{try_join, Allocate, Context, Preprocess};
+use mpz_common::{Allocate, Context, Preprocess};
 use mpz_core::{prg::Prg, Block};
 use mpz_ot_core::{
     kos::{
@@ -12,7 +11,7 @@ use mpz_ot_core::{
         pad_ot_count, receiver_state as state, Receiver as ReceiverCore, ReceiverConfig,
         ReceiverKeys, CSP,
     },
-    OTReceiverOutput, ROTReceiverOutput, TransferId,
+    OTReceiverOutput, ROTReceiverOutput,
 };
 
 use enum_try_as_inner::EnumTryAsInner;
@@ -20,22 +19,18 @@ use rand::{
     distributions::{Distribution, Standard},
     thread_rng, Rng,
 };
-use rand_core::SeedableRng;
+use rand_core::{OsRng, SeedableRng};
 use serio::{stream::IoStreamExt as _, SinkExt as _};
 use utils_aio::non_blocking_backend::{Backend, NonBlockingBackend};
 
-use super::{ReceiverError, ReceiverVerifyError, EXTEND_CHUNK_SIZE};
-use crate::{
-    OTError, OTReceiver, OTSender, OTSetup, RandomOTReceiver, VerifiableOTReceiver,
-    VerifiableOTSender,
-};
+use super::{ReceiverError, EXTEND_CHUNK_SIZE};
+use crate::{OTError, OTReceiver, OTSender, OTSetup, RandomOTReceiver};
 
 #[derive(Debug, EnumTryAsInner)]
 #[derive_err(Debug)]
 pub(crate) enum State {
     Initialized(Box<ReceiverCore<state::Initialized>>),
     Extension(Box<ReceiverCore<state::Extension>>),
-    Verify(ReceiverCore<state::Verify>),
     Error,
 }
 
@@ -45,7 +40,6 @@ pub struct Receiver<BaseOT> {
     state: State,
     base: BaseOT,
     alloc: usize,
-    cointoss_receiver: Option<cointoss::Receiver<cointoss::receiver_state::Received>>,
 }
 
 impl<BaseOT> Receiver<BaseOT>
@@ -62,17 +56,12 @@ where
             state: State::Initialized(Box::new(ReceiverCore::new(config))),
             base,
             alloc: 0,
-            cointoss_receiver: None,
         }
     }
 
     /// The number of remaining OTs which can be consumed.
     pub fn remaining(&self) -> Result<usize, ReceiverError> {
         Ok(self.state.try_as_extension()?.remaining())
-    }
-
-    pub(crate) fn state(&self) -> &State {
-        &self.state
     }
 
     /// Returns the provided number of keys.
@@ -136,46 +125,6 @@ where
     }
 }
 
-impl<BaseOT> Receiver<BaseOT>
-where
-    BaseOT: Send,
-{
-    pub(crate) async fn verify_delta<Ctx: Context>(
-        &mut self,
-        ctx: &mut Ctx,
-    ) -> Result<(), ReceiverError>
-    where
-        BaseOT: VerifiableOTSender<Ctx, bool, [Block; 2]>,
-    {
-        let receiver = std::mem::replace(&mut self.state, State::Error).try_into_extension()?;
-
-        // Finalize coin toss to determine expected delta
-        let Some(cointoss_receiver) = self.cointoss_receiver.take() else {
-            return Err(ReceiverError::ConfigError(
-                "committed sender not configured".to_string(),
-            ))?;
-        };
-
-        let expected_delta = cointoss_receiver
-            .finalize(ctx)
-            .await
-            .map_err(ReceiverError::from)?[0];
-
-        // Receive delta by verifying the sender's base OT choices.
-        let choices = self.base.verify_choices(ctx).await?;
-
-        let actual_delta = <[u8; 16]>::from_lsb0_iter(choices).into();
-
-        if expected_delta != actual_delta {
-            return Err(ReceiverError::from(ReceiverVerifyError::InconsistentDelta));
-        }
-
-        self.state = State::Verify(receiver.start_verification(actual_delta)?);
-
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl<Ctx, BaseOT> OTSetup<Ctx> for Receiver<BaseOT>
 where
@@ -191,23 +140,9 @@ where
             .try_into_initialized()
             .map_err(ReceiverError::from)?;
 
-        // If the sender is committed, we run a coin toss
-        if ext_receiver.config().sender_commit() {
-            let cointoss_seed = thread_rng().gen();
-            let (cointoss_receiver, _) = try_join!(
-                ctx,
-                cointoss::Receiver::new(vec![cointoss_seed])
-                    .receive(ctx)
-                    .map_err(ReceiverError::from),
-                self.base.setup(ctx).map_err(ReceiverError::from)
-            )??;
+        self.base.setup(ctx).await?;
 
-            self.cointoss_receiver = Some(cointoss_receiver);
-        } else {
-            self.base.setup(ctx).await?;
-        }
-
-        let seeds: [[Block; 2]; CSP] = std::array::from_fn(|_| thread_rng().gen());
+        let seeds: [[Block; 2]; CSP] = std::array::from_fn(|_| OsRng.gen());
 
         // Send seeds to sender
         self.base.send(ctx, &seeds).await?;
@@ -354,34 +289,5 @@ where
         .await?;
 
         Ok(OTReceiverOutput { id, msgs: received })
-    }
-}
-
-#[async_trait]
-impl<Ctx, BaseOT> VerifiableOTReceiver<Ctx, bool, Block, [Block; 2]> for Receiver<BaseOT>
-where
-    Ctx: Context,
-    BaseOT: VerifiableOTSender<Ctx, bool, [Block; 2]> + Send,
-{
-    async fn accept_reveal(&mut self, ctx: &mut Ctx) -> Result<(), OTError> {
-        self.verify_delta(ctx).await.map_err(OTError::from)
-    }
-
-    async fn verify(
-        &mut self,
-        _ctx: &mut Ctx,
-        id: TransferId,
-        msgs: &[[Block; 2]],
-    ) -> Result<(), OTError> {
-        let receiver = self.state.try_as_verify().map_err(ReceiverError::from)?;
-
-        let record = receiver.remove_record(id).map_err(ReceiverError::from)?;
-
-        let msgs = msgs.to_vec();
-        Backend::spawn(move || record.verify(&msgs))
-            .await
-            .map_err(ReceiverError::from)?;
-
-        Ok(())
     }
 }

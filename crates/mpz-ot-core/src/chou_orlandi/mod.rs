@@ -38,7 +38,6 @@ pub(crate) fn hash_point(point: &RistrettoPoint, tweak: u128) -> Block {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use itybity::IntoBitIterator;
     use rstest::*;
 
     use rand::Rng;
@@ -112,65 +111,5 @@ mod tests {
         let received_data = receiver.receive(sender_payload).unwrap();
 
         assert_eq!(received_data, expected);
-    }
-
-    #[rstest]
-    fn test_committed_ot_receiver_pass(
-        choices: Vec<bool>,
-        data: Vec<[Block; 2]>,
-        expected: Vec<Block>,
-    ) {
-        let (mut sender, mut receiver) = setup(
-            SenderConfig::builder().receiver_commit().build().unwrap(),
-            ReceiverConfig::builder().receiver_commit().build().unwrap(),
-        );
-
-        let receiver_payload = receiver.receive_random(&choices);
-        let sender_payload = sender.send(&data, receiver_payload).unwrap();
-
-        let received_data = receiver.receive(sender_payload).unwrap();
-
-        assert_eq!(received_data, expected);
-
-        let receiver_reveal = receiver.reveal_choices().unwrap();
-
-        let verified_choices = sender
-            .verify_choices(RECEIVER_SEED, receiver_reveal)
-            .unwrap();
-
-        assert_eq!(choices, verified_choices.into_lsb0_vec());
-    }
-
-    #[rstest]
-    fn test_committed_ot_receiver_cheat_choice(
-        choices: Vec<bool>,
-        data: Vec<[Block; 2]>,
-        expected: Vec<Block>,
-    ) {
-        let (mut sender, mut receiver) = setup(
-            SenderConfig::builder().receiver_commit().build().unwrap(),
-            ReceiverConfig::builder().receiver_commit().build().unwrap(),
-        );
-
-        let receiver_payload = receiver.receive_random(&choices);
-        let sender_payload = sender.send(&data, receiver_payload).unwrap();
-
-        let received_data = receiver.receive(sender_payload).unwrap();
-
-        assert_eq!(received_data, expected);
-
-        let mut receiver_reveal = receiver.reveal_choices().unwrap();
-
-        // Flip a bit
-        receiver_reveal.choices[0] ^= 1;
-
-        let err = sender
-            .verify_choices(RECEIVER_SEED, receiver_reveal)
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            SenderError::VerifyError(error::SenderVerifyError::InconsistentChoice)
-        ));
     }
 }

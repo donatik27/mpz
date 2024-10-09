@@ -2,10 +2,9 @@ use std::mem;
 
 use async_trait::async_trait;
 use enum_try_as_inner::EnumTryAsInner;
-use futures::TryFutureExt;
 use itybity::IntoBits;
 use mpz_cointoss as cointoss;
-use mpz_common::{try_join, Allocate, Context, Preprocess};
+use mpz_common::{Allocate, Context, Preprocess};
 use mpz_core::{prg::Prg, Block};
 use mpz_ot_core::{
     kos::{
@@ -19,21 +18,17 @@ use rand::{
     distributions::{Distribution, Standard},
     thread_rng, Rng,
 };
-use rand_core::SeedableRng;
+use rand_core::{OsRng, SeedableRng};
 use serio::{stream::IoStreamExt as _, SinkExt as _};
 use utils_aio::non_blocking_backend::{Backend, NonBlockingBackend};
 
-use crate::{
-    kos::SenderError, CommittedOTReceiver, CommittedOTSender, OTError, OTReceiver, OTSender,
-    OTSetup, RandomOTSender,
-};
+use crate::{kos::SenderError, OTError, OTReceiver, OTSender, OTSetup, RandomOTSender};
 
 #[derive(Debug, EnumTryAsInner)]
 #[derive_err(Debug)]
 pub(crate) enum State {
     Initialized(SenderCore<state::Initialized>),
     Extension(SenderCore<state::Extension>),
-    Complete,
     Error,
 }
 
@@ -43,7 +38,6 @@ pub struct Sender<BaseOT> {
     state: State,
     base: BaseOT,
     alloc: usize,
-    cointoss_sender: Option<cointoss::Sender<cointoss::sender_state::Received>>,
 }
 
 impl<BaseOT: Send> Sender<BaseOT> {
@@ -57,7 +51,6 @@ impl<BaseOT: Send> Sender<BaseOT> {
             state: State::Initialized(SenderCore::new(config)),
             base,
             alloc: 0,
-            cointoss_sender: None,
         }
     }
 
@@ -89,12 +82,6 @@ impl<BaseOT: Send> Sender<BaseOT> {
     where
         BaseOT: OTReceiver<Ctx, bool, Block>,
     {
-        if self.state.try_as_initialized()?.config().sender_commit() {
-            return Err(SenderError::ConfigError(
-                "committed sender can not choose delta".to_string(),
-            ));
-        }
-
         self._setup_with_delta(ctx, delta).await
     }
 
@@ -186,32 +173,6 @@ impl<BaseOT: Send> Sender<BaseOT> {
     }
 }
 
-impl<BaseOT: Send> Sender<BaseOT> {
-    pub(crate) async fn reveal<Ctx: Context>(&mut self, ctx: &mut Ctx) -> Result<(), SenderError>
-    where
-        BaseOT: CommittedOTReceiver<Ctx, bool, Block>,
-    {
-        std::mem::replace(&mut self.state, State::Error).try_into_extension()?;
-
-        // Reveal coin toss payload
-        let Some(sender) = self.cointoss_sender.take() else {
-            return Err(SenderError::ConfigError(
-                "committed sender not configured".to_string(),
-            ))?;
-        };
-
-        sender.finalize(ctx).await.map_err(SenderError::from)?;
-
-        // Reveal base OT choices
-        self.base.reveal_choices(ctx).await?;
-
-        // This sender is no longer usable, so mark it as complete.
-        self.state = State::Complete;
-
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl<Ctx, BaseOT> OTSetup<Ctx> for Sender<BaseOT>
 where
@@ -227,32 +188,8 @@ where
             .try_into_initialized()
             .map_err(SenderError::from)?;
 
-        // If the sender is committed, we sample delta using a coin toss.
-        let delta = if sender.config().sender_commit() {
-            let cointoss_seed = thread_rng().gen();
-
-            // Execute coin-toss protocol and base OT setup concurrently.
-            let ((seeds, cointoss_sender), _) = try_join!(
-                ctx,
-                async {
-                    cointoss::Sender::new(vec![cointoss_seed])
-                        .commit(ctx)
-                        .await?
-                        .receive(ctx)
-                        .await
-                        .map_err(SenderError::from)
-                },
-                self.base.setup(ctx).map_err(SenderError::from)
-            )??;
-
-            // Store the sender to finalize the cointoss protocol later.
-            self.cointoss_sender = Some(cointoss_sender);
-
-            seeds[0]
-        } else {
-            self.base.setup(ctx).await?;
-            Block::random(&mut thread_rng())
-        };
+        self.base.setup(ctx).await?;
+        let delta = Block::random(&mut OsRng);
 
         self.state = State::Initialized(sender);
 
@@ -392,16 +329,5 @@ where
             .collect();
 
         Ok(ROTSenderOutput { id, msgs })
-    }
-}
-
-#[async_trait]
-impl<Ctx, BaseOT> CommittedOTSender<Ctx, [Block; 2]> for Sender<BaseOT>
-where
-    Ctx: Context,
-    BaseOT: CommittedOTReceiver<Ctx, bool, Block> + Send,
-{
-    async fn reveal(&mut self, ctx: &mut Ctx) -> Result<(), OTError> {
-        self.reveal(ctx).await.map_err(OTError::from)
     }
 }

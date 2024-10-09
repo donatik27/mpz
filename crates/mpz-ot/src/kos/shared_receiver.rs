@@ -4,15 +4,14 @@ use async_trait::async_trait;
 use itybity::IntoBitIterator;
 use mpz_common::{sync::AsyncMutex, Allocate, Context, Preprocess};
 use mpz_core::Block;
-use mpz_ot_core::{kos::msgs::SenderPayload, OTReceiverOutput, ROTReceiverOutput, TransferId};
+use mpz_ot_core::{kos::msgs::SenderPayload, OTReceiverOutput, ROTReceiverOutput};
 use rand::distributions::{Distribution, Standard};
 use serio::{stream::IoStreamExt, SinkExt};
 use utils_aio::non_blocking_backend::{Backend, NonBlockingBackend};
 
 use crate::{
     kos::{Receiver, ReceiverError},
-    OTError, OTReceiver, OTSender, OTSetup, RandomOTReceiver, VerifiableOTReceiver,
-    VerifiableOTSender,
+    OTError, OTReceiver, OTSender, OTSetup, RandomOTReceiver,
 };
 
 /// A shared KOS receiver.
@@ -102,38 +101,5 @@ where
         count: usize,
     ) -> Result<ROTReceiverOutput<bool, T>, OTError> {
         self.inner.lock(ctx).await?.receive_random(ctx, count).await
-    }
-}
-
-#[async_trait]
-impl<Ctx, BaseOT> VerifiableOTReceiver<Ctx, bool, Block, [Block; 2]> for SharedReceiver<BaseOT>
-where
-    Ctx: Context,
-    BaseOT: VerifiableOTSender<Ctx, bool, [Block; 2]> + Send,
-{
-    async fn accept_reveal(&mut self, ctx: &mut Ctx) -> Result<(), OTError> {
-        self.inner.lock(ctx).await?.accept_reveal(ctx).await
-    }
-
-    async fn verify(
-        &mut self,
-        _ctx: &mut Ctx,
-        id: TransferId,
-        msgs: &[[Block; 2]],
-    ) -> Result<(), OTError> {
-        let record = {
-            let inner = self.inner.blocking_lock_unsync();
-
-            let receiver = inner.state().try_as_verify().map_err(ReceiverError::from)?;
-
-            receiver.remove_record(id).map_err(ReceiverError::from)?
-        };
-
-        let msgs = msgs.to_vec();
-        Backend::spawn(move || record.verify(&msgs))
-            .await
-            .map_err(ReceiverError::from)?;
-
-        Ok(())
     }
 }

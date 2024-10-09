@@ -16,11 +16,12 @@ pub(crate) use receiver::StateError as ReceiverStateError;
 pub(crate) use sender::StateError as SenderStateError;
 
 pub use mpz_ot_core::kos::{
-    msgs, PayloadRecord, ReceiverConfig, ReceiverConfigBuilder, ReceiverConfigBuilderError,
-    ReceiverKeys, SenderConfig, SenderConfigBuilder, SenderConfigBuilderError, SenderKeys,
+    msgs, ReceiverConfig, ReceiverConfigBuilder, ReceiverConfigBuilderError, ReceiverKeys,
+    SenderConfig, SenderConfigBuilder, SenderConfigBuilderError, SenderKeys,
 };
 
-// If we're testing we use a smaller chunk size to make sure the chunking code paths are tested.
+// If we're testing we use a smaller chunk size to make sure the chunking code
+// paths are tested.
 cfg_if::cfg_if! {
     if #[cfg(test)] {
         pub(crate) const EXTEND_CHUNK_SIZE: usize = 1024;
@@ -45,8 +46,7 @@ mod tests {
 
     use crate::{
         ideal::ot::{ideal_ot, IdealOTReceiver, IdealOTSender},
-        CommittedOTSender, OTError, OTReceiver, OTSender, OTSetup, RandomOTReceiver,
-        RandomOTSender, VerifiableOTReceiver,
+        OTError, OTReceiver, OTSender, OTSetup, RandomOTReceiver, RandomOTSender,
     };
 
     #[fixture]
@@ -186,44 +186,6 @@ mod tests {
 
         assert_eq!(output_sender.id, output_receiver.id);
         assert_eq!(output_receiver.msgs, expected);
-    }
-
-    #[rstest]
-    #[tokio::test]
-    async fn test_kos_committed_sender(data: Vec<[Block; 2]>, choices: Vec<bool>) {
-        let (mut ctx_sender, mut ctx_receiver) = test_st_executor(8);
-        let (mut sender, mut receiver) = setup(
-            SenderConfig::builder().sender_commit().build().unwrap(),
-            ReceiverConfig::builder().sender_commit().build().unwrap(),
-            &mut ctx_sender,
-            &mut ctx_receiver,
-            data.len(),
-        )
-        .await;
-
-        let (output_sender, output_receiver) = tokio::try_join!(
-            OTSender::<_, [Block; 2]>::send(&mut sender, &mut ctx_sender, &data)
-                .map_err(OTError::from),
-            OTReceiver::<_, bool, Block>::receive(&mut receiver, &mut ctx_receiver, &choices)
-                .map_err(OTError::from)
-        )
-        .unwrap();
-
-        let expected = choose(data.iter().copied(), choices.iter_lsb0()).collect::<Vec<_>>();
-
-        assert_eq!(output_sender.id, output_receiver.id);
-        assert_eq!(output_receiver.msgs, expected);
-
-        tokio::try_join!(
-            CommittedOTSender::reveal(&mut sender, &mut ctx_sender),
-            receiver.accept_reveal(&mut ctx_receiver)
-        )
-        .unwrap();
-
-        receiver
-            .verify(&mut ctx_receiver, output_receiver.id, &data)
-            .await
-            .unwrap();
     }
 
     #[rstest]

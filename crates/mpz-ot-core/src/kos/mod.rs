@@ -10,10 +10,10 @@ pub use config::{
     ReceiverConfig, ReceiverConfigBuilder, ReceiverConfigBuilderError, SenderConfig,
     SenderConfigBuilder, SenderConfigBuilderError,
 };
-pub use error::{ReceiverError, ReceiverVerifyError, SenderError};
+pub use error::{ReceiverError, SenderError};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
-pub use receiver::{state as receiver_state, PayloadRecord, Receiver, ReceiverKeys};
+pub use receiver::{state as receiver_state, Receiver, ReceiverKeys};
 pub use sender::{state as sender_state, Sender, SenderKeys};
 
 /// Computational security parameter
@@ -33,7 +33,8 @@ pub(crate) type Aes128Ctr = ctr::Ctr64LE<aes::Aes128>;
 pub fn pad_ot_count(mut count: usize) -> usize {
     // Add OTs for the KOS extension check.
     count += CSP + SSP;
-    // Round up the OTs to extend to the nearest multiple of 64 (matrix transpose optimization).
+    // Round up the OTs to extend to the nearest multiple of 64 (matrix transpose
+    // optimization).
     (count + 63) & !63
 }
 
@@ -281,7 +282,8 @@ mod tests {
 
         let mut receiver_setup = receiver.extend(512).unwrap();
 
-        // Flip a bit in the receiver's extension message (breaking the mono-chrome choice vector)
+        // Flip a bit in the receiver's extension message (breaking the mono-chrome
+        // choice vector)
         *receiver_setup.us.first_mut().unwrap() ^= 1;
 
         sender.extend(512, receiver_setup).unwrap();
@@ -290,96 +292,5 @@ mod tests {
         let err = sender.check(chi_seed, receiver_check).unwrap_err();
 
         assert!(matches!(err, SenderError::ConsistencyCheckFailed));
-    }
-
-    #[rstest]
-    fn test_kos_extension_verify_messages(
-        delta: Block,
-        sender_seeds: [Block; CSP],
-        receiver_seeds: [[Block; 2]; CSP],
-        chi_seed: Block,
-        choices: Vec<bool>,
-        data: Vec<[Block; 2]>,
-        expected: Vec<Block>,
-    ) {
-        let sender = Sender::new(SenderConfig::default());
-        let receiver = Receiver::new(ReceiverConfig::builder().sender_commit().build().unwrap());
-
-        let mut sender = sender.setup(delta, sender_seeds);
-        let mut receiver = receiver.setup(receiver_seeds);
-
-        let receiver_setup = receiver.extend(choices.len() + 256).unwrap();
-        sender.extend(data.len() + 256, receiver_setup).unwrap();
-
-        let receiver_check = receiver.check(chi_seed).unwrap();
-        sender.check(chi_seed, receiver_check).unwrap();
-
-        let mut receiver_keys = receiver.keys(choices.len()).unwrap();
-        let derandomize = receiver_keys.derandomize(&choices).unwrap();
-
-        let mut sender_keys = sender.keys(data.len()).unwrap();
-        sender_keys.derandomize(derandomize).unwrap();
-        let payload = sender_keys.encrypt_blocks(&data).unwrap();
-
-        let id = payload.id;
-
-        let received = receiver_keys.decrypt_blocks(payload).unwrap();
-
-        assert_eq!(received, expected);
-
-        let receiver = receiver.start_verification(delta).unwrap();
-
-        receiver.remove_record(id).unwrap().verify(&data).unwrap();
-    }
-
-    #[rstest]
-    fn test_kos_extension_verify_messages_fail(
-        delta: Block,
-        sender_seeds: [Block; CSP],
-        receiver_seeds: [[Block; 2]; CSP],
-        chi_seed: Block,
-        choices: Vec<bool>,
-        mut data: Vec<[Block; 2]>,
-        expected: Vec<Block>,
-    ) {
-        let sender = Sender::new(SenderConfig::default());
-        let receiver = Receiver::new(ReceiverConfig::builder().sender_commit().build().unwrap());
-
-        let mut sender = sender.setup(delta, sender_seeds);
-        let mut receiver = receiver.setup(receiver_seeds);
-
-        let receiver_setup = receiver.extend(choices.len() + 256).unwrap();
-        sender.extend(data.len() + 256, receiver_setup).unwrap();
-
-        let receiver_check = receiver.check(chi_seed).unwrap();
-        sender.check(chi_seed, receiver_check).unwrap();
-
-        let mut receiver_keys = receiver.keys(choices.len()).unwrap();
-        let derandomize = receiver_keys.derandomize(&choices).unwrap();
-
-        let mut sender_keys = sender.keys(data.len()).unwrap();
-        sender_keys.derandomize(derandomize).unwrap();
-        let payload = sender_keys.encrypt_blocks(&data).unwrap();
-
-        let id = payload.id;
-
-        let received = receiver_keys.decrypt_blocks(payload).unwrap();
-
-        assert_eq!(received, expected);
-
-        data[0][0] = Block::default();
-
-        let receiver = receiver.start_verification(delta).unwrap();
-
-        let err = receiver
-            .remove_record(id)
-            .unwrap()
-            .verify(&data)
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            ReceiverError::ReceiverVerifyError(ReceiverVerifyError::InconsistentPayload)
-        ));
     }
 }

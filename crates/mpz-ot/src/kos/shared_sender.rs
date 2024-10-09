@@ -9,8 +9,7 @@ use serio::{stream::IoStreamExt as _, SinkExt as _};
 
 use crate::{
     kos::{Sender, SenderError},
-    CommittedOTReceiver, CommittedOTSender, OTError, OTReceiver, OTSender, OTSenderOutput, OTSetup,
-    ROTSenderOutput, RandomOTSender,
+    OTError, OTReceiver, OTSender, OTSenderOutput, OTSetup, ROTSenderOutput, RandomOTSender,
 };
 
 /// A shared KOS sender.
@@ -97,21 +96,5 @@ where
         count: usize,
     ) -> Result<ROTSenderOutput<[T; 2]>, OTError> {
         self.inner.lock(ctx).await?.send_random(ctx, count).await
-    }
-}
-
-#[async_trait]
-impl<Ctx, BaseOT> CommittedOTSender<Ctx, [Block; 2]> for SharedSender<BaseOT>
-where
-    Ctx: Context,
-    BaseOT: CommittedOTReceiver<Ctx, bool, Block> + Send + 'static,
-{
-    async fn reveal(&mut self, ctx: &mut Ctx) -> Result<(), OTError> {
-        self.inner
-            .lock(ctx)
-            .await?
-            .reveal(ctx)
-            .await
-            .map_err(OTError::from)
     }
 }

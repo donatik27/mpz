@@ -36,18 +36,4 @@ pub enum ReceiverError {
     InsufficientSetup(usize, usize),
     #[error("invalid payload")]
     InvalidPayload(String),
-    #[error(transparent)]
-    ReceiverVerifyError(#[from] ReceiverVerifyError),
-}
-
-/// Errors that can occur during verification of the sender's messages.
-#[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
-pub enum ReceiverVerifyError {
-    #[error("tape was not recorded")]
-    TapeNotRecorded,
-    #[error("invalid transfer id: {0}")]
-    InvalidTransferId(TransferId),
-    #[error("payload inconsistent")]
-    InconsistentPayload,
 }
