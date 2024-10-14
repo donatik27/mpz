@@ -11,10 +11,6 @@ use utils::range::RangeSet;
 
 #[derive(Debug, Default)]
 pub struct InputState {
-    /// Ranges which are allocated but not committed.
-    uncommitted: RangeSet<usize>,
-    /// Ranges which are pending commitment.
-    pending: RangeSet<usize>,
     /// Ranges which are fully committed in both parties views.
     complete: RangeSet<usize>,
     /// All input ranges.
@@ -23,10 +19,6 @@ pub struct InputState {
 
 #[derive(Debug, Default)]
 pub struct OutputState {
-    /// Output ranges which are allocated but not initialized.
-    uninit: RangeSet<usize>,
-    /// Output ranges which are executed.
-    complete: RangeSet<usize>,
     /// All output ranges.
     all: RangeSet<usize>,
 }
@@ -64,8 +56,7 @@ impl FlushState {
 pub struct ProverFlush {
     state: FlushState,
     adjust: BitVec,
-    mac_bits: BitVec,
-    proof: Hash,
+    mac_proof: Option<(BitVec, Hash)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,7 +70,7 @@ mod tests {
     use mpz_memory_core::{
         binary::U8,
         correlated::{Delta, Key},
-        Array, MemoryExt, ToRaw, ViewExt,
+        Array, MemoryExt, ViewExt,
     };
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -93,8 +84,8 @@ mod tests {
         let mut verifier = VerifierStore::new(delta);
         let mut prover = ProverStore::default();
 
-        let keys = (0..256).map(|_| rng.gen()).collect::<Vec<Key>>();
-        let masks = BitVec::from_iter((0..256).map(|_| rng.gen::<bool>()));
+        let keys = (0..128).map(|_| rng.gen()).collect::<Vec<Key>>();
+        let masks = BitVec::from_iter((0..128).map(|_| rng.gen::<bool>()));
         let macs = keys
             .iter()
             .zip(&masks)
@@ -104,20 +95,8 @@ mod tests {
         let a_v: Array<U8, 16> = verifier.alloc().unwrap();
         let b_v: Array<U8, 16> = verifier.alloc().unwrap();
 
-        verifier.set_input_keys(a_v.to_raw(), &keys[..128]).unwrap();
-        verifier
-            .set_output_keys(b_v.to_raw(), &keys[128..])
-            .unwrap();
-
         let a_p: Array<U8, 16> = prover.alloc().unwrap();
         let b_p: Array<U8, 16> = prover.alloc().unwrap();
-
-        prover
-            .set_input_macs(a_p.to_raw(), &masks[..128], &macs[..128])
-            .unwrap();
-        prover
-            .set_input_macs(b_p.to_raw(), &masks[128..], &macs[128..])
-            .unwrap();
 
         verifier.mark_public(a_v).unwrap();
         verifier.mark_blind(b_v).unwrap();
@@ -134,6 +113,17 @@ mod tests {
 
         let mut b_v = verifier.decode(b_v).unwrap();
         let _ = prover.decode(b_p).unwrap();
+
+        assert!(verifier.wants_keys());
+        assert!(prover.wants_macs());
+
+        let recv_v = verifier.receive_keys().unwrap();
+        let rec_p = prover.receive_macs().unwrap();
+
+        assert_eq!(recv_v.count(), rec_p.count());
+
+        recv_v.receive(&keys).unwrap();
+        rec_p.receive(&masks, &macs).unwrap();
 
         assert!(verifier.wants_flush());
         assert!(prover.wants_flush());

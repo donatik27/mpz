@@ -142,7 +142,8 @@ where
                     x: node_x,
                     z: node_z,
                 } => {
-                    let x = self.buffer[node_x.id()];
+                    let mut x = self.buffer[node_x.id()];
+                    x.adjust(true, &self.delta);
                     self.buffer[node_z.id()] = x;
                 }
             }
@@ -156,7 +157,8 @@ where
             todo!()
         }
 
-        // If there were 0 AND gates in the circuit, we need to evaluate the "free" gates now.
+        // If there were 0 AND gates in the circuit, we need to evaluate the "free"
+        // gates now.
         if !self.complete {
             self.next(Default::default());
         }

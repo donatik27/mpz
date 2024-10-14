@@ -17,8 +17,12 @@ pub mod kos;
 use async_trait::async_trait;
 
 pub use mpz_ot_core::{
-    COTReceiverOutput, COTSenderOutput, OTReceiverOutput, OTSenderOutput, RCOTReceiverOutput,
-    RCOTSenderOutput, ROTReceiverOutput, ROTSenderOutput, TransferId,
+    rcot::{
+        RCOTReceiver, RCOTReceiverOutput, RCOTRecvFuture, RCOTRecvFutureError, RCOTSendFuture,
+        RCOTSendFutureError, RCOTSender, RCOTSenderOutput,
+    },
+    COTReceiverOutput, COTSenderOutput, OTReceiverOutput, OTSenderOutput, ROTReceiverOutput,
+    ROTSenderOutput, TransferId,
 };
 
 /// An oblivious transfer error.
@@ -168,11 +172,8 @@ pub trait RandomOTReceiver<Ctx, T, U> {
 pub trait RandomCOTReceiver<Ctx, T, U> {
     /// Obliviously receives correlated messages with random choices.
     ///
-    /// Returns a tuple of the choices and the messages, respectively.
-    ///
     /// # Arguments
     ///
-    /// * `ctx` - The thread context.
     /// * `count` - The number of correlated messages to obliviously receive.
     async fn receive_random_correlated(
         &mut self,

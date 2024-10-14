@@ -147,10 +147,12 @@ impl KeyStore {
     /// Creates a new key store.
     #[inline]
     pub fn new(delta: Delta) -> Self {
+        let mut public_one = Key(MAC_ONE ^ delta.as_block());
+        public_one.0.set_lsb(false);
         Self {
             keys: Store::default(),
             delta,
-            public_one: Key(MAC_ONE ^ delta.as_block()),
+            public_one,
             used: RangeSet::default(),
         }
     }

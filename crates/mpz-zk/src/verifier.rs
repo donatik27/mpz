@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use mpz_common::{scoped, Context, ContextError};
+use mpz_common::{scoped, Context, ContextError, Flush};
 use mpz_core::{bitvec::BitVec, Block};
-use mpz_ot::{OTError, RCOTSenderOutput, RandomCOTSender};
+use mpz_ot::{OTError, RCOTSender, RCOTSenderOutput, RandomCOTSender};
 use mpz_vm_core::{
     memory::{
         binary::Binary,
@@ -24,6 +24,9 @@ type Result<T, E = Error> = core::result::Result<T, E>;
 pub struct Verifier<OT> {
     store: VerifierStore,
     ot: OT,
+
+    /// Number of AND gates in the call stack.
+    gate_count: usize,
     callstack: Vec<(Call, Slice)>,
 }
 
@@ -33,6 +36,7 @@ impl<OT> Verifier<OT> {
         Self {
             store: VerifierStore::new(delta),
             ot,
+            gate_count: 0,
             callstack: Vec::default(),
         }
     }
@@ -42,11 +46,21 @@ impl<OT> Verifier<OT> {
 impl<Ctx, OT> Execute<Ctx> for Verifier<OT>
 where
     Ctx: Context,
-    OT: RandomCOTSender<Ctx, Block> + Send + 'static,
+    OT: RCOTSender<Block> + Flush<Ctx> + Send + 'static,
 {
     type Error = Error;
 
     async fn flush(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let wants_keys = self.store.wants_keys();
+        if wants_keys > 0 {
+            let recv = self.store.receive_keys()?;
+            let RCOTSenderOutput { keys, .. } =
+                self.ot.try_send_rcot(wants_keys).map_err(Error::ot)?;
+            let keys = Key::from_blocks(keys);
+
+            recv.receive(&keys)?;
+        }
+
         while self.store.wants_flush() {
             let (recv, flush) = self.store.flush()?;
             ctx.io_mut().send(flush).await?;
@@ -57,12 +71,22 @@ where
         Ok(())
     }
 
-    async fn preprocess(&mut self, _ctx: &mut Ctx) -> Result<()> {
-        // Nothing to do.
+    async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.ot
+            .alloc(self.gate_count + self.store.wants_keys())
+            .map_err(Error::ot)?;
+        self.ot.flush(ctx).await.map_err(Error::ot)?;
+
+        self.gate_count = 0;
+
         Ok(())
     }
 
     async fn execute(&mut self, ctx: &mut Ctx) -> Result<()> {
+        if self.gate_count > self.ot.available() {
+            todo!()
+        }
+
         while !self.callstack.is_empty() {
             let ready_calls: Vec<_> = self
                 .callstack
@@ -95,11 +119,11 @@ where
                 .sum();
 
             let RCOTSenderOutput {
-                msgs: gate_keys, ..
-            } = self.ot.send_random_correlated(ctx, gate_count).await?;
+                keys: gate_keys, ..
+            } = self.ot.try_send_rcot(gate_count).map_err(Error::ot)?;
+            let gate_keys = Key::from_blocks(gate_keys);
 
             let delta = *self.store.delta();
-            let gate_keys = Key::from_blocks(gate_keys);
             let outputs = ctx
                 .blocking(scoped!(move |ctx| {
                     let mut verifier = Core::new(delta);
@@ -146,8 +170,11 @@ impl<OT> Vm<Binary> for Verifier<OT> {
     type Error = Error;
 
     fn call_raw(&mut self, call: Call) -> Result<Slice> {
-        let output = self.alloc_raw(call.circ().output_len())?;
+        let output = self.store.alloc_output(call.circ().output_len());
+
+        self.gate_count += call.circ().and_count();
         self.callstack.push((call, output));
+
         Ok(output)
     }
 }
@@ -165,6 +192,10 @@ impl<OT> Memory<Binary> for Verifier<OT> {
 
     fn commit_raw(&mut self, slice: Slice) -> Result<()> {
         self.store.commit_raw(slice).map_err(Error::from)
+    }
+
+    fn get_raw(&self, slice: Slice) -> Result<Option<BitVec>> {
+        self.store.get_raw(slice).map_err(Error::from)
     }
 
     fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
@@ -192,6 +223,15 @@ impl<OT> View<Binary> for Verifier<OT> {
 #[error(transparent)]
 pub struct VerifierError(#[from] ErrorRepr);
 
+impl VerifierError {
+    fn ot<E>(err: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    {
+        Self(ErrorRepr::Ot(err.into()))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ErrorRepr {
     #[error(transparent)]
@@ -202,8 +242,8 @@ enum ErrorRepr {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Context(#[from] ContextError),
-    #[error(transparent)]
-    Ot(#[from] OTError),
+    #[error("oblivious transfer error: {0}")]
+    Ot(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 impl From<CoreError> for VerifierError {
@@ -227,11 +267,5 @@ impl From<std::io::Error> for VerifierError {
 impl From<ContextError> for VerifierError {
     fn from(err: ContextError) -> Self {
         Self(ErrorRepr::Context(err))
-    }
-}
-
-impl From<OTError> for VerifierError {
-    fn from(err: OTError) -> Self {
-        Self(ErrorRepr::Ot(err))
     }
 }

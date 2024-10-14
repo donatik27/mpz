@@ -7,14 +7,14 @@ pub use verifier::{Verifier, VerifierError};
 #[cfg(test)]
 mod tests {
     use mpz_circuits::circuits::AES128;
-    use mpz_common::executor::test_st_executor;
-    use mpz_ot::ideal::cot::ideal_cot_with_delta;
+    use mpz_common::{executor::test_st_executor, Flush};
+    use mpz_ot::{ideal::rcot::ideal_rcot, RCOTReceiver, RCOTSender};
     use mpz_vm_core::{
         memory::{binary::U8, correlated::Delta, Array},
         prelude::*,
         Call,
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
 
@@ -24,7 +24,7 @@ mod tests {
         let delta = Delta::random(&mut rng);
         let (mut ctx_p, mut ctx_v) = test_st_executor(8);
 
-        let (ot_send, ot_recv) = ideal_cot_with_delta(delta.into_inner());
+        let (ot_send, ot_recv) = ideal_rcot(rng.gen(), delta.into_inner());
 
         let mut prover = Prover::new(ot_recv);
         let mut verifier = Verifier::new(delta, ot_send);
@@ -49,6 +49,7 @@ mod tests {
 
                 let ciphertext = prover.decode(ciphertext).unwrap();
 
+                prover.preprocess(&mut ctx_p).await.unwrap();
                 prover.flush(&mut ctx_p).await.unwrap();
                 prover.execute(&mut ctx_p).await.unwrap();
                 prover.flush(&mut ctx_p).await.unwrap();
@@ -73,6 +74,7 @@ mod tests {
 
                 let ciphertext = verifier.decode(ciphertext).unwrap();
 
+                verifier.preprocess(&mut ctx_v).await.unwrap();
                 verifier.flush(&mut ctx_v).await.unwrap();
                 verifier.execute(&mut ctx_v).await.unwrap();
                 verifier.flush(&mut ctx_v).await.unwrap();
@@ -80,5 +82,7 @@ mod tests {
                 ciphertext.await.unwrap()
             }
         );
+
+        assert_eq!(ciphertext_p, ciphertext_v);
     }
 }

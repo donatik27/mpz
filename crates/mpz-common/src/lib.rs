@@ -1,9 +1,10 @@
 //! Common functionality for `mpz`.
 //!
-//! This crate provides various common functionalities needed for modeling protocol execution, I/O,
-//! and multi-threading.
+//! This crate provides various common functionalities needed for modeling
+//! protocol execution, I/O, and multi-threading.
 //!
-//! This crate does not provide any cryptographic primitives, see `mpz-core` for that.
+//! This crate does not provide any cryptographic primitives, see `mpz-core` for
+//! that.
 
 #![deny(
     unsafe_code,
@@ -45,6 +46,16 @@ pub trait Preprocess<Ctx>: Allocate {
 
     /// Preprocesses the functionality.
     async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<(), Self::Error>;
+}
+
+/// A functionality that can be flushed.
+#[async_trait]
+pub trait Flush<Ctx> {
+    /// Error type.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Flushes the functionality.
+    async fn flush(&mut self, ctx: &mut Ctx) -> Result<(), Self::Error>;
 }
 
 /// A convenience macro for creating a closure which returns a scoped future.

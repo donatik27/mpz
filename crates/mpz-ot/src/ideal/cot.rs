@@ -8,7 +8,9 @@ use mpz_common::{
 };
 use mpz_core::Block;
 use mpz_ot_core::{
-    ideal::cot::IdealCOT, COTReceiverOutput, COTSenderOutput, RCOTReceiverOutput, RCOTSenderOutput,
+    ideal::cot::IdealCOT,
+    rcot::{RCOTReceiverOutput, RCOTSenderOutput},
+    COTReceiverOutput, COTSenderOutput,
 };
 
 use crate::{COTReceiver, COTSender, OTError, OTSetup, RandomCOTReceiver, RandomCOTSender};
@@ -221,7 +223,7 @@ mod tests {
         let (
             RCOTSenderOutput {
                 id: id_a,
-                msgs: sender_msgs,
+                keys: sender_msgs,
             },
             RCOTReceiverOutput {
                 id: id_b,

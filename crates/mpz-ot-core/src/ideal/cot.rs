@@ -4,15 +4,23 @@ use mpz_core::{prg::Prg, Block};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::{COTReceiverOutput, COTSenderOutput, RCOTReceiverOutput, RCOTSenderOutput, TransferId};
+use crate::{
+    rcot::{RCOTReceiverOutput, RCOTSenderOutput},
+    COTReceiverOutput, COTSenderOutput, TransferId,
+};
 
 /// The ideal COT functionality.
 #[derive(Debug)]
 pub struct IdealCOT {
     delta: Block,
-    transfer_id: TransferId,
-    counter: usize,
+    sender_transfer_id: TransferId,
+    receiver_transfer_id: TransferId,
+    count_sender: usize,
+    count_receiver: usize,
     prg: Prg,
+    keys: Vec<Block>,
+    msgs: Vec<Block>,
+    choices: Vec<bool>,
 }
 
 impl IdealCOT {
@@ -25,9 +33,14 @@ impl IdealCOT {
     pub fn new(seed: Block, delta: Block) -> Self {
         IdealCOT {
             delta,
-            transfer_id: TransferId::default(),
-            counter: 0,
+            sender_transfer_id: TransferId::default(),
+            receiver_transfer_id: TransferId::default(),
+            count_sender: 0,
+            count_receiver: 0,
             prg: Prg::from_seed(seed),
+            keys: Vec::new(),
+            msgs: Vec::new(),
+            choices: Vec::new(),
         }
     }
 
@@ -41,19 +54,69 @@ impl IdealCOT {
         self.delta = delta;
     }
 
-    /// Returns the current transfer id.
-    pub fn transfer_id(&self) -> TransferId {
-        self.transfer_id
+    /// Preprocesses `count` random COTs.
+    fn preprocess(&mut self, count: usize) {
+        self.keys
+            .resize_with(self.keys.len() + count, || self.prg.gen());
+        self.msgs.resize(self.msgs.len() + count, Block::ZERO);
+        self.choices
+            .resize_with(self.choices.len() + count, || self.prg.gen());
+
+        let start = self.msgs.len() - count;
+        self.msgs[start..]
+            .iter_mut()
+            .zip(&self.keys[self.keys.len() - count..])
+            .zip(&self.choices[self.choices.len() - count..])
+            .for_each(|((msg, key), choice)| *msg = if *choice { *key ^ self.delta } else { *key });
     }
 
-    /// Returns the number of OTs executed.
-    pub fn count(&self) -> usize {
-        self.counter
+    /// Returns the number of preprocessed COTs available for the sender.
+    fn available_sender(&self) -> usize {
+        self.keys.len() - self.count_sender
+    }
+
+    /// Returns the number of preprocessed COTs available for the receiver.
+    fn available_receiver(&self) -> usize {
+        self.choices.len() - self.count_receiver
+    }
+
+    /// Sends preprocessed random correlated oblivious transfers.
+    pub fn send_random_correlated(&mut self, count: usize) -> RCOTSenderOutput<Block> {
+        if count > self.available_sender() {
+            self.preprocess(count - self.available_sender());
+        }
+
+        let keys = self.keys[self.count_sender..self.count_sender + count].to_vec();
+
+        let id = self.sender_transfer_id.next();
+        self.count_sender += count;
+
+        RCOTSenderOutput { id, keys }
+    }
+
+    /// Receives preprocessed random correlated oblivious transfers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `count` is greater than the number of preprocessed OTs.
+    pub fn receive_random_correlated(&mut self, count: usize) -> RCOTReceiverOutput<bool, Block> {
+        if count > self.available_receiver() {
+            self.preprocess(count - self.available_receiver());
+        }
+
+        let choices = self.choices[self.count_receiver..self.count_receiver + count].to_vec();
+        let msgs = self.msgs[self.count_receiver..self.count_receiver + count].to_vec();
+
+        let id = self.receiver_transfer_id.next();
+        self.count_receiver += count;
+
+        RCOTReceiverOutput { id, choices, msgs }
     }
 
     /// Executes random correlated oblivious transfers.
     ///
-    /// The functionality deals random choices to the receiver, along with the corresponding messages.
+    /// The functionality deals random choices to the receiver, along with the
+    /// corresponding messages.
     ///
     /// # Arguments
     ///
@@ -62,32 +125,14 @@ impl IdealCOT {
         &mut self,
         count: usize,
     ) -> (RCOTSenderOutput<Block>, RCOTReceiverOutput<bool, Block>) {
-        let mut msgs = vec![Block::ZERO; count];
-        let mut choices = vec![false; count];
-
-        self.prg.random_blocks(&mut msgs);
-        self.prg.random_bools(&mut choices);
-
-        let chosen: Vec<Block> = msgs
-            .iter()
-            .zip(choices.iter())
-            .map(|(&q, &r)| if r { q ^ self.delta } else { q })
-            .collect();
-
-        self.counter += count;
-        let id = self.transfer_id.next();
-
         (
-            RCOTSenderOutput { id, msgs },
-            RCOTReceiverOutput {
-                id,
-                choices,
-                msgs: chosen,
-            },
+            self.send_random_correlated(count),
+            self.receive_random_correlated(count),
         )
     }
 
-    /// Executes correlated oblivious transfers with choices provided by the receiver.
+    /// Executes correlated oblivious transfers with choices provided by the
+    /// receiver.
     ///
     /// # Arguments
     ///
@@ -106,12 +151,15 @@ impl IdealCOT {
             }
         });
 
-        self.counter += msgs.len();
-        let id = self.transfer_id.next();
-
         (
-            COTSenderOutput { id, msgs },
-            COTReceiverOutput { id, msgs: received },
+            COTSenderOutput {
+                id: self.sender_transfer_id.next(),
+                msgs,
+            },
+            COTReceiverOutput {
+                id: self.receiver_transfer_id.next(),
+                msgs: received,
+            },
         )
     }
 }
@@ -134,7 +182,7 @@ mod tests {
         let mut ideal = IdealCOT::default();
 
         let (
-            RCOTSenderOutput { msgs, .. },
+            RCOTSenderOutput { keys: msgs, .. },
             RCOTReceiverOutput {
                 choices,
                 msgs: received,

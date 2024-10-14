@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use mpz_common::{scoped, Context, ContextError};
+use mpz_common::{scoped, Context, ContextError, Flush};
 use mpz_core::{bitvec::BitVec, Block};
-use mpz_ot::{COTReceiver, OTError, RCOTReceiverOutput, RandomCOTReceiver};
+use mpz_ot::{RCOTReceiver, RCOTReceiverOutput};
 use mpz_vm_core::{
     memory::{binary::Binary, correlated::Mac, DecodeFuture, Memory, Slice, View},
     Call, Execute, Vm,
@@ -20,6 +20,9 @@ type Result<T, E = Error> = core::result::Result<T, E>;
 pub struct Prover<OT> {
     store: ProverStore,
     ot: OT,
+
+    /// Number of AND gates in the call stack.
+    gate_count: usize,
     callstack: Vec<(Call, Slice)>,
 }
 
@@ -29,6 +32,7 @@ impl<OT> Prover<OT> {
         Self {
             store: ProverStore::default(),
             ot,
+            gate_count: 0,
             callstack: Vec::default(),
         }
     }
@@ -38,11 +42,24 @@ impl<OT> Prover<OT> {
 impl<Ctx, OT> Execute<Ctx> for Prover<OT>
 where
     Ctx: Context,
-    OT: RandomCOTReceiver<Ctx, bool, Block> + Send + 'static,
+    OT: RCOTReceiver<bool, Block> + Flush<Ctx> + Send + 'static,
 {
     type Error = Error;
 
     async fn flush(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let wants_macs = self.store.wants_macs();
+        if wants_macs > 0 {
+            let recv = self.store.receive_macs()?;
+            let RCOTReceiverOutput {
+                msgs: macs,
+                choices: masks,
+                ..
+            } = self.ot.try_recv_rcot(wants_macs).map_err(Error::ot)?;
+            let masks = BitVec::from_iter(masks);
+            let macs = Mac::from_blocks(macs);
+            recv.receive(&masks, &macs)?;
+        }
+
         while self.store.wants_flush() {
             let (recv, flush) = self.store.flush()?;
             ctx.io_mut().send(flush).await?;
@@ -53,12 +70,22 @@ where
         Ok(())
     }
 
-    async fn preprocess(&mut self, _ctx: &mut Ctx) -> Result<()> {
-        // Nothing to do.
+    async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.ot
+            .alloc(self.gate_count + self.store.wants_macs())
+            .map_err(Error::ot)?;
+        self.ot.flush(ctx).await.map_err(Error::ot)?;
+
+        self.gate_count = 0;
+
         Ok(())
     }
 
     async fn execute(&mut self, ctx: &mut Ctx) -> Result<()> {
+        if self.gate_count > self.ot.available() {
+            todo!()
+        }
+
         while !self.callstack.is_empty() {
             let ready_calls: Vec<_> = self
                 .callstack
@@ -94,7 +121,7 @@ where
                 choices: gate_masks,
                 msgs: gate_macs,
                 ..
-            } = self.ot.receive_random_correlated(ctx, gate_count).await?;
+            } = self.ot.try_recv_rcot(gate_count).map_err(Error::ot)?;
 
             let gate_macs = Mac::from_blocks(gate_macs);
             let outputs = ctx
@@ -137,12 +164,18 @@ where
     }
 }
 
-impl<OT> Vm<Binary> for Prover<OT> {
+impl<OT> Vm<Binary> for Prover<OT>
+where
+    OT: RCOTReceiver<bool, Block>,
+{
     type Error = Error;
 
     fn call_raw(&mut self, call: Call) -> Result<Slice> {
-        let output = self.alloc_raw(call.circ().output_len())?;
+        let output = self.store.alloc_output(call.circ().output_len());
+
+        self.gate_count += call.circ().and_count();
         self.callstack.push((call, output));
+
         Ok(output)
     }
 }
@@ -160,6 +193,10 @@ impl<OT> Memory<Binary> for Prover<OT> {
 
     fn commit_raw(&mut self, slice: Slice) -> Result<()> {
         self.store.commit_raw(slice).map_err(Error::from)
+    }
+
+    fn get_raw(&self, slice: Slice) -> Result<Option<BitVec>> {
+        self.store.get_raw(slice).map_err(Error::from)
     }
 
     fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
@@ -187,6 +224,15 @@ impl<OT> View<Binary> for Prover<OT> {
 #[error(transparent)]
 pub struct ProverError(#[from] ErrorRepr);
 
+impl ProverError {
+    fn ot<E>(err: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    {
+        Self(ErrorRepr::Ot(err.into()))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ErrorRepr {
     #[error(transparent)]
@@ -197,8 +243,8 @@ enum ErrorRepr {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Context(#[from] ContextError),
-    #[error(transparent)]
-    Ot(#[from] OTError),
+    #[error("oblivious transfer error: {0}")]
+    Ot(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<CoreError> for ProverError {
@@ -222,11 +268,5 @@ impl From<std::io::Error> for ProverError {
 impl From<ContextError> for ProverError {
     fn from(err: ContextError) -> Self {
         Self(ErrorRepr::Context(err))
-    }
-}
-
-impl From<OTError> for ProverError {
-    fn from(err: OTError) -> Self {
-        Self(ErrorRepr::Ot(err))
     }
 }

@@ -1,12 +1,14 @@
-//! Low-level crate containing core functionalities for oblivious transfer protocols.
+//! Low-level crate containing core functionalities for oblivious transfer
+//! protocols.
 //!
-//! This crate is not intended to be used directly. Instead, use the higher-level APIs provided by
-//! the `mpz-ot` crate.
+//! This crate is not intended to be used directly. Instead, use the
+//! higher-level APIs provided by the `mpz-ot` crate.
 //!
 //! # ⚠️ Warning ⚠️
 //!
-//! Some implementations make assumptions about invariants which may not be checked if using these
-//! low-level APIs naively. Failing to uphold these invariants may result in security vulnerabilities.
+//! Some implementations make assumptions about invariants which may not be
+//! checked if using these low-level APIs naively. Failing to uphold these
+//! invariants may result in security vulnerabilities.
 //!
 //! USE AT YOUR OWN RISK.
 
@@ -26,6 +28,8 @@ pub mod ferret;
 pub mod ideal;
 pub mod kos;
 pub mod msgs;
+/// Random correlated oblivious transfer.
+pub mod rcot;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test;
 
@@ -68,26 +72,6 @@ pub struct COTReceiverOutput<T> {
     pub id: TransferId,
     /// The chosen messages.
     pub msgs: Vec<T>,
-}
-
-/// The output the sender receives from the random COT functionality.
-#[derive(Debug)]
-pub struct RCOTSenderOutput<T> {
-    /// The transfer id.
-    pub id: TransferId,
-    /// The `0-bit` messages.
-    pub msgs: Vec<T>,
-}
-
-/// The output the receiver receives from the random COT functionality.
-#[derive(Debug)]
-pub struct RCOTReceiverOutput<T, U> {
-    /// The transfer id.
-    pub id: TransferId,
-    /// The choice bits.
-    pub choices: Vec<T>,
-    /// The chosen messages.
-    pub msgs: Vec<U>,
 }
 
 /// The output the sender receives from the ROT functionality.

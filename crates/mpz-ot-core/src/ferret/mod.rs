@@ -52,9 +52,12 @@ mod tests {
     use receiver::Receiver;
     use sender::Sender;
 
-    use crate::ideal::{cot::IdealCOT, mpcot::IdealMpcot};
-    use crate::test::assert_cot;
-    use crate::{MPCOTReceiverOutput, MPCOTSenderOutput, RCOTReceiverOutput, RCOTSenderOutput};
+    use crate::{
+        ideal::{cot::IdealCOT, mpcot::IdealMpcot},
+        rcot::{RCOTReceiverOutput, RCOTSenderOutput},
+        test::assert_cot,
+        MPCOTReceiverOutput, MPCOTSenderOutput,
+    };
     use mpz_core::{lpn::LpnParameters, prg::Prg};
     use rand::SeedableRng;
 
@@ -80,7 +83,7 @@ mod tests {
         // Invoke Ideal COT to init the Ferret setup phase.
         let (sender_cot, receiver_cot) = ideal_cot.random_correlated(LPN_PARAMETERS_TEST.k);
 
-        let RCOTSenderOutput { msgs: v, .. } = sender_cot;
+        let RCOTSenderOutput { keys: v, .. } = sender_cot;
         let RCOTReceiverOutput {
             choices: u,
             msgs: w,

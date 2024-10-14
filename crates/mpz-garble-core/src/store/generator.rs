@@ -288,6 +288,13 @@ impl Memory<Binary> for GeneratorStore {
         Ok(())
     }
 
+    fn get_raw(&self, slice: Slice) -> Result<Option<BitVec>> {
+        self.data_store
+            .try_get(slice)
+            .map(|data| Some(data.to_bitvec()))
+            .map_err(Error::from)
+    }
+
     fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
         let (fut, mut op) = DecodeFuture::new(slice);
 

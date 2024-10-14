@@ -272,3 +272,31 @@ impl From<StoreError> for MacStoreError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+
+    #[test]
+    fn test_adjust() {
+        let mut store = MacStore::new();
+
+        let macs = vec![Mac::PUBLIC[0], Mac::PUBLIC[1]];
+
+        let slice = store.alloc_with(&macs);
+        let data = BitVec::<u32>::from_iter([true, false]);
+
+        store.adjust(slice, &data).unwrap();
+
+        let bits = store
+            .try_get(slice)
+            .unwrap()
+            .iter()
+            .map(|mac| mac.pointer())
+            .collect::<Vec<_>>();
+
+        assert_eq!(bits, vec![true, false]);
+    }
+}

@@ -101,6 +101,11 @@ impl<F> Clone for Bob<F> {
 
 impl<F> Bob<F> {
     /// Returns a lock to the ideal functionality.
+    pub fn get(&self) -> MutexGuard<'_, F> {
+        self.f.lock().unwrap()
+    }
+
+    /// Returns a lock to the ideal functionality.
     pub fn get_mut(&mut self) -> MutexGuard<'_, F> {
         self.f.lock().unwrap()
     }

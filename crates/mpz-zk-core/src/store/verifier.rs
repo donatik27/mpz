@@ -13,7 +13,7 @@ use mpz_memory_core::{
 };
 use utils::{
     filter_drain::FilterDrain,
-    range::{Disjoint, Subset},
+    range::{Difference, Disjoint, Subset},
 };
 
 use crate::store::{DecodeState, FlushState, InputState, OutputState, ProverFlush, VerifierFlush};
@@ -50,6 +50,17 @@ impl VerifierStore {
         }
     }
 
+    pub fn alloc_output(&mut self, size: usize) -> Slice {
+        self.view.alloc(size);
+        self.key_store.alloc(size);
+        let slice = self.data_store.alloc(size);
+
+        let range = slice.to_range();
+        self.output_state.all |= &range;
+
+        slice
+    }
+
     /// Returns delta.
     pub fn delta(&self) -> &Delta {
         self.key_store.delta()
@@ -64,27 +75,33 @@ impl VerifierStore {
         self.key_store.try_get(slice).map_err(Error::from)
     }
 
-    pub fn set_input_keys(&mut self, slice: Slice, keys: &[Key]) -> Result<()> {
-        self.key_store.try_set(slice, keys).map_err(Error::from)
-    }
-
     /// Sets the output keys for a circuit.
     pub fn set_output_keys(&mut self, slice: Slice, keys: &[Key]) -> Result<()> {
-        self.key_store.try_set(slice, keys).map_err(Error::from)
+        self.key_store.try_set(slice, keys)?;
+
+        self.flush_state.prove |=
+            (slice.to_range() & &self.decode_state.all) - &self.decode_state.complete;
+
+        Ok(())
     }
 
-    pub fn wants_flush(&mut self) -> bool {
-        let wants_decode =
-            (self.decode_state.all.clone() - &self.decode_state.complete) - self.view.public();
+    /// Returns the number of keys the store wants.
+    pub fn wants_keys(&self) -> usize {
+        ((self.input_state.all.clone() - self.key_store.set_ranges()) - self.view.public()).len()
+    }
 
-        self.flush_state.commit = self.input_state.pending.clone() - self.view.public();
-        self.flush_state.prove = (self.input_state.complete.clone()
-            // Can commit and prove simulatenously.
-            | &self.flush_state.commit
-            | &self.output_state.complete)
-            & wants_decode;
-
+    /// Returns `true` if the store wants a flush.
+    pub fn wants_flush(&self) -> bool {
         !self.flush_state.is_empty()
+    }
+
+    pub fn receive_keys(&mut self) -> Result<ReceiveKeys<'_>> {
+        let ranges =
+            (self.input_state.all.clone() - self.key_store.set_ranges()) - self.view.public();
+        Ok(ReceiveKeys {
+            store: self,
+            ranges,
+        })
     }
 
     pub fn flush(&mut self) -> Result<(ReceiveFlush<'_>, VerifierFlush)> {
@@ -109,6 +126,36 @@ impl VerifierStore {
 }
 
 #[must_use]
+pub struct ReceiveKeys<'a> {
+    store: &'a mut VerifierStore,
+    ranges: RangeSet,
+}
+
+impl<'a> ReceiveKeys<'a> {
+    /// Receives keys.
+    pub fn receive(self, keys: &[Key]) -> Result<()> {
+        if keys.len() != self.ranges.len() {
+            todo!()
+        }
+
+        let mut i = 0;
+        for range in self.ranges.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+
+            self.store
+                .key_store
+                .try_set(slice, &keys[i..i + slice.len()])?;
+
+            i += slice.len();
+        }
+
+        self.store.flush_state.prove |= self.ranges.clone() & &self.store.decode_state.all;
+
+        Ok(())
+    }
+}
+
+#[must_use]
 pub struct ReceiveFlush<'a> {
     store: &'a mut VerifierStore,
 }
@@ -118,8 +165,7 @@ impl ReceiveFlush<'_> {
         let ProverFlush {
             state,
             adjust,
-            mac_bits,
-            proof,
+            mac_proof,
         } = flush;
 
         if state != self.store.flush_state {
@@ -141,16 +187,16 @@ impl ReceiveFlush<'_> {
         }
 
         // Verify MAC proofs.
-        let mut bits = mac_bits;
-        self.store
-            .key_store
-            .verify(&state.prove, &mut bits, proof)?;
-        for range in state.prove.iter_ranges() {
-            let slice = Slice::from_range_unchecked(range);
-            self.store.data_store.try_set(slice, &bits)?;
+        if let Some((mut bits, proof)) = mac_proof {
+            self.store
+                .key_store
+                .verify(&state.prove, &mut bits, proof)?;
+            for range in state.prove.iter_ranges() {
+                let slice = Slice::from_range_unchecked(range);
+                self.store.data_store.try_set(slice, &bits)?;
+            }
         }
 
-        self.store.input_state.pending -= &state.commit;
         self.store.input_state.complete |= &state.commit;
         self.store.decode_state.complete |= &state.prove;
 
@@ -169,9 +215,7 @@ impl Memory<Binary> for VerifierStore {
         self.key_store.alloc(size);
         let slice = self.data_store.alloc(size);
 
-        let range = slice.to_range();
-        self.input_state.uncommitted |= &range;
-        self.input_state.all |= &range;
+        self.input_state.all |= slice.to_range();
 
         Ok(slice)
     }
@@ -184,6 +228,16 @@ impl Memory<Binary> for VerifierStore {
         }
 
         self.data_store.try_set(slice, &data)?;
+
+        // For public data, set keys.
+        let public = slice.to_range() & self.view.public();
+        for range in public.iter_ranges() {
+            let slice = Slice::from_range_unchecked(range);
+
+            let data = self.data_store.try_get(slice)?;
+            self.key_store.try_set_public(slice, data)?;
+        }
+        self.input_state.complete |= public;
 
         Ok(())
     }
@@ -207,10 +261,16 @@ impl Memory<Binary> for VerifierStore {
             }
         }
 
-        self.input_state.uncommitted -= &range;
-        self.input_state.pending |= &range;
+        self.flush_state.commit |= range.difference(&self.input_state.complete);
 
         Ok(())
+    }
+
+    fn get_raw(&self, slice: Slice) -> Result<Option<BitVec>> {
+        self.data_store
+            .try_get(slice)
+            .map(|data| Some(data.to_bitvec()))
+            .map_err(Error::from)
     }
 
     fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {
@@ -223,7 +283,12 @@ impl Memory<Binary> for VerifierStore {
             self.buffer_decode.push(op);
         }
 
-        self.decode_state.all |= slice.to_range();
+        let range = slice.to_range();
+
+        // Prove ranges which have MACs set and are not yet proven.
+        self.flush_state.prove |=
+            range.difference(&self.decode_state.complete) & self.key_store.set_ranges();
+        self.decode_state.all |= range;
 
         Ok(fut)
     }

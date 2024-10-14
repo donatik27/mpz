@@ -84,12 +84,16 @@ impl<OT> Memory<Binary> for Generator<OT> {
         self.store.alloc_raw(size).map_err(Error::from)
     }
 
+    fn assign_raw(&mut self, slice: Slice, value: BitVec) -> Result<()> {
+        self.store.assign_raw(slice, value).map_err(Error::from)
+    }
+
     fn commit_raw(&mut self, slice: Slice) -> Result<()> {
         self.store.commit_raw(slice).map_err(Error::from)
     }
 
-    fn assign_raw(&mut self, slice: Slice, value: BitVec) -> Result<()> {
-        self.store.assign_raw(slice, value).map_err(Error::from)
+    fn get_raw(&self, slice: Slice) -> Result<Option<BitVec>> {
+        self.store.get_raw(slice).map_err(Error::from)
     }
 
     fn decode_raw(&mut self, slice: Slice) -> Result<DecodeFuture<BitVec>> {

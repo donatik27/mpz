@@ -32,6 +32,9 @@ pub trait Memory<T: MemoryType> {
     /// Commits the slice of memory.
     fn commit_raw(&mut self, slice: Slice) -> Result<(), Self::Error>;
 
+    /// Gets the data from memory, returning `None` if the slice is not present.
+    fn get_raw(&self, slice: Slice) -> Result<Option<T::Raw>, Self::Error>;
+
     /// Decodes data from memory.
     ///
     /// Returns a future which will resolve to the value when it is ready.
@@ -73,6 +76,16 @@ pub trait MemoryExt<T: MemoryType>: Memory<T> {
         R: Repr<T>,
     {
         self.commit_raw(value.to_raw())
+    }
+
+    /// Gets the value from memory, returning `None` if the value is not
+    /// present.
+    fn get<R>(&self, value: R) -> Result<Option<R::Clear>, Self::Error>
+    where
+        R: Repr<T>,
+    {
+        self.get_raw(value.to_raw())
+            .map(|opt| opt.map(R::Clear::from_clear))
     }
 
     /// Decodes the value.

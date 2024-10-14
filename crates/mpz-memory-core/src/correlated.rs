@@ -1,46 +1,57 @@
 //! Correlated memory store.
 //!
-//! This module provides a memory store for protocols which use authenticated MACs with a linear correlation structure:
+//! This module provides a memory store for protocols which use authenticated
+//! MACs with a linear correlation structure:
 //!
 //! `M = k + x * Δ`
 //!
-//! Where `k` is a random key, `x` is the authenticated value, and `Δ` is a global correlation value referred to as delta.
+//! Where `k` is a random key, `x` is the authenticated value, and `Δ` is a
+//! global correlation value referred to as delta.
 //!
-//! One party, the Sender, holds the key `k` and delta `Δ`. The other party, the Receiver, holds the MAC `M`.
+//! One party, the Sender, holds the key `k` and delta `Δ`. The other party, the
+//! Receiver, holds the MAC `M`.
 //!
-//! `M` can be viewed as a MAC on `x` which can be verified by the Sender by checking the relation above holds.
+//! `M` can be viewed as a MAC on `x` which can be verified by the Sender by
+//! checking the relation above holds.
 //!
 //! # Fields
 //!
-//! At the moment we only support the binary field, where the MACs and keys are in the extension field `GF(2^128)`.
+//! At the moment we only support the binary field, where the MACs and keys are
+//! in the extension field `GF(2^128)`.
 //!
 //! # Pointer bit
 //!
-//! The least significant bit of the keys and delta `Δ` is used as a pointer bit. This bit encodes the truth value of
-//! the MAC `M` in the following way:
+//! The least significant bit of the keys and delta `Δ` is used as a pointer
+//! bit. This bit encodes the truth value of the MAC `M` in the following way:
 //!
-//! The pointer bit of delta `Δ` is fixed to 1, which ensures the relation `LSB(M) = LSB(k) ^ x` is present. With this,
-//! the value `x` can be recovered easily given only 1 bit of the MAC `M` and of the key `k`.
+//! The pointer bit of delta `Δ` is fixed to 1, which ensures the relation
+//! `LSB(M) = LSB(k) ^ x` is present. With this, the value `x` can be recovered
+//! easily given only 1 bit of the MAC `M` and of the key `k`.
 //!
-//! Note that `k` is sampled uniformly at random, so its pointer bit can be viewed as a one-time pad on `x`. A Receiver
-//! presented with a MAC `M` alone learns nothing about `x`.
+//! Note that `k` is sampled uniformly at random, so its pointer bit can be
+//! viewed as a one-time pad on `x`. A Receiver presented with a MAC `M` alone
+//! learns nothing about `x`.
 //!
-//! Notice also that this can be viewed as an additive secret sharing of the value `x`, where the Sender holds
-//! `LSB(k)` and the Receiver holds `LSB(M)` such that `x = LSB(k) ^ LSB(M)`.
+//! Notice also that this can be viewed as an additive secret sharing of the
+//! value `x`, where the Sender holds `LSB(k)` and the Receiver holds `LSB(M)`
+//! such that `x = LSB(k) ^ LSB(M)`.
 //!
 //! # Derandomization
 //!
-//! During the offline-phase, the Sender and Receiver can compute MACs on random values provided by the
-//! Receiver and later derandomize them.
+//! During the offline-phase, the Sender and Receiver can compute MACs on random
+//! values provided by the Receiver and later derandomize them.
 //!
-//! For example, given a MAC `M = k + r * Δ` where `r` is a random value known only to the Receiver, the Receiver can obtain a
-//! MAC on the value `x` by sending `d = x ^ r`.
+//! For example, given a MAC `M = k + r * Δ` where `r` is a random value known
+//! only to the Receiver, the Receiver can obtain a MAC on the value `x` by
+//! sending `d = x ^ r`.
 //!
-//! The Sender then adjusts their key `k` by computing `k = k + d * Δ` and sets `LSB(k) = 0`.
+//! The Sender then adjusts their key `k` by computing `k = k + d * Δ` and sets
+//! `LSB(k) = 0`.
 //!
 //! The Receiver adjusts their MAC by setting `LSB(M) = x`.
 //!
-//! In the end, the relationships hold `M = k + x * Δ` and `LSB(M) = LSB(k) ^ x`.
+//! In the end, the relationships hold `M = k + x * Δ` and `LSB(M) = LSB(k) ^
+//! x`.
 
 mod keys;
 mod macs;
@@ -55,7 +66,7 @@ use rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng};
 
 /// Block for public 0 MAC.
 pub(crate) const MAC_ZERO: Block = Block::new([
-    147, 239, 91, 41, 112, 62, 197, 196, 204, 121, 176, 38, 171, 216, 63, 120,
+    146, 239, 91, 41, 80, 62, 197, 196, 204, 121, 176, 38, 171, 216, 63, 120,
 ]);
 /// Block for public 1 MAC.
 pub(crate) const MAC_ONE: Block = Block::new([
@@ -318,5 +329,7 @@ mod tests {
 
         assert_eq!(MAC_ZERO, zero);
         assert_eq!(MAC_ONE, one);
+        assert!(!MAC_ZERO.lsb());
+        assert!(MAC_ONE.lsb());
     }
 }

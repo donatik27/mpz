@@ -10,7 +10,11 @@ mod tests {
     use mpz_core::prg::Prg;
 
     use super::{receiver::Receiver as SpcotReceiver, sender::Sender as SpcotSender};
-    use crate::{ferret::CSP, ideal::cot::IdealCOT, RCOTReceiverOutput, RCOTSenderOutput};
+    use crate::{
+        ferret::CSP,
+        ideal::cot::IdealCOT,
+        rcot::{RCOTReceiverOutput, RCOTSenderOutput},
+    };
 
     #[test]
     fn spcot_test() {
@@ -36,7 +40,7 @@ mod tests {
             msgs: ts,
             ..
         } = msg_for_receiver;
-        let RCOTSenderOutput { msgs: qs, .. } = msg_for_sender;
+        let RCOTSenderOutput { keys: qs, .. } = msg_for_sender;
         let maskbits = receiver.extend_mask_bits(h1, alpha1, &rs).unwrap();
 
         let msg_from_sender = sender.extend(h1, &qs, maskbits).unwrap();
@@ -54,7 +58,7 @@ mod tests {
             msgs: ts,
             ..
         } = msg_for_receiver;
-        let RCOTSenderOutput { msgs: qs, .. } = msg_for_sender;
+        let RCOTSenderOutput { keys: qs, .. } = msg_for_sender;
 
         let maskbits = receiver.extend_mask_bits(h2, alpha2, &rs).unwrap();
 
@@ -71,7 +75,7 @@ mod tests {
             ..
         } = msg_for_receiver;
 
-        let RCOTSenderOutput { msgs: y_star, .. } = msg_for_sender;
+        let RCOTSenderOutput { keys: y_star, .. } = msg_for_sender;
 
         let check_from_receiver = receiver.check_pre(&x_star).unwrap();
 
