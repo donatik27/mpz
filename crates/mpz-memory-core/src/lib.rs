@@ -392,6 +392,45 @@ pub struct Vector<T> {
     _pd: PhantomData<T>,
 }
 
+impl<T> Vector<T> {
+    /// Returns the length of the vector.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns `true` if the vector is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns a slice of the vector, or `None` if the range is out of bounds.
+    pub fn get(&self, range: Range) -> Option<Vector<T>> {
+        if range.end > self.len {
+            return None;
+        }
+
+        let ptr = Ptr::new(self.ptr.as_usize() + range.start * self.item_size);
+
+        Some(Vector {
+            ptr,
+            item_size: self.item_size,
+            len: range.len(),
+            _pd: PhantomData,
+        })
+    }
+
+    /// Shortens the vector, keeping the first len elements and dropping the
+    /// rest.
+    ///
+    /// If len is greater or equal to the vector’s current length, this has no
+    /// effect.
+    pub fn truncate(&mut self, len: usize) {
+        if len < self.len {
+            self.len = len;
+        }
+    }
+}
+
 impl<T, R: MemoryType> FromRaw<R> for Vector<T>
 where
     T: StaticSize<R>,
