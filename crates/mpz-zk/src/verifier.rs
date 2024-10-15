@@ -24,9 +24,6 @@ type Result<T, E = Error> = core::result::Result<T, E>;
 pub struct Verifier<OT> {
     store: VerifierStore,
     ot: OT,
-
-    /// Number of AND gates in the call stack.
-    gate_count: usize,
     callstack: Vec<(Call, Slice)>,
 }
 
@@ -36,7 +33,6 @@ impl<OT> Verifier<OT> {
         Self {
             store: VerifierStore::new(delta),
             ot,
-            gate_count: 0,
             callstack: Vec::default(),
         }
     }
@@ -53,6 +49,10 @@ where
     async fn flush(&mut self, ctx: &mut Ctx) -> Result<()> {
         let wants_keys = self.store.wants_keys();
         if wants_keys > 0 {
+            if self.ot.available() < wants_keys {
+                self.preprocess(ctx).await?;
+            }
+
             let recv = self.store.receive_keys()?;
             let RCOTSenderOutput { keys, .. } =
                 self.ot.try_send_rcot(wants_keys).map_err(Error::ot)?;
@@ -72,20 +72,13 @@ where
     }
 
     async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.ot
-            .alloc(self.gate_count + self.store.wants_keys())
-            .map_err(Error::ot)?;
         self.ot.flush(ctx).await.map_err(Error::ot)?;
-
-        self.gate_count = 0;
 
         Ok(())
     }
 
     async fn execute(&mut self, ctx: &mut Ctx) -> Result<()> {
-        if self.gate_count > self.ot.available() {
-            todo!()
-        }
+        self.preprocess(ctx).await?;
 
         while !self.callstack.is_empty() {
             let ready_calls: Vec<_> = self
@@ -166,13 +159,16 @@ where
     }
 }
 
-impl<OT> Vm<Binary> for Verifier<OT> {
+impl<OT> Vm<Binary> for Verifier<OT>
+where
+    OT: RCOTSender<Block>,
+{
     type Error = Error;
 
     fn call_raw(&mut self, call: Call) -> Result<Slice> {
         let output = self.store.alloc_output(call.circ().output_len());
 
-        self.gate_count += call.circ().and_count();
+        self.ot.alloc(call.circ().and_count()).map_err(Error::ot)?;
         self.callstack.push((call, output));
 
         Ok(output)
@@ -203,7 +199,10 @@ impl<OT> Memory<Binary> for Verifier<OT> {
     }
 }
 
-impl<OT> View<Binary> for Verifier<OT> {
+impl<OT> View<Binary> for Verifier<OT>
+where
+    OT: RCOTSender<Block>,
+{
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
@@ -211,11 +210,18 @@ impl<OT> View<Binary> for Verifier<OT> {
     }
 
     fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_private_raw(slice).map_err(Error::from)
+        let res = self.store.mark_private_raw(slice).map_err(Error::from);
+
+        debug_assert!(res.is_err());
+
+        res
     }
 
     fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_blind_raw(slice).map_err(Error::from)
+        self.store.mark_blind_raw(slice)?;
+        self.ot.alloc(slice.len()).map_err(Error::ot)?;
+
+        Ok(())
     }
 }
 

@@ -20,9 +20,6 @@ type Result<T, E = Error> = core::result::Result<T, E>;
 pub struct Prover<OT> {
     store: ProverStore,
     ot: OT,
-
-    /// Number of AND gates in the call stack.
-    gate_count: usize,
     callstack: Vec<(Call, Slice)>,
 }
 
@@ -32,7 +29,6 @@ impl<OT> Prover<OT> {
         Self {
             store: ProverStore::default(),
             ot,
-            gate_count: 0,
             callstack: Vec::default(),
         }
     }
@@ -49,6 +45,10 @@ where
     async fn flush(&mut self, ctx: &mut Ctx) -> Result<()> {
         let wants_macs = self.store.wants_macs();
         if wants_macs > 0 {
+            if self.ot.available() < wants_macs {
+                self.preprocess(ctx).await?;
+            }
+
             let recv = self.store.receive_macs()?;
             let RCOTReceiverOutput {
                 msgs: macs,
@@ -71,20 +71,13 @@ where
     }
 
     async fn preprocess(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.ot
-            .alloc(self.gate_count + self.store.wants_macs())
-            .map_err(Error::ot)?;
         self.ot.flush(ctx).await.map_err(Error::ot)?;
-
-        self.gate_count = 0;
 
         Ok(())
     }
 
     async fn execute(&mut self, ctx: &mut Ctx) -> Result<()> {
-        if self.gate_count > self.ot.available() {
-            todo!()
-        }
+        self.preprocess(ctx).await.map_err(Error::ot)?;
 
         while !self.callstack.is_empty() {
             let ready_calls: Vec<_> = self
@@ -173,7 +166,7 @@ where
     fn call_raw(&mut self, call: Call) -> Result<Slice> {
         let output = self.store.alloc_output(call.circ().output_len());
 
-        self.gate_count += call.circ().and_count();
+        self.ot.alloc(call.circ().and_count()).map_err(Error::ot)?;
         self.callstack.push((call, output));
 
         Ok(output)
@@ -204,7 +197,10 @@ impl<OT> Memory<Binary> for Prover<OT> {
     }
 }
 
-impl<OT> View<Binary> for Prover<OT> {
+impl<OT> View<Binary> for Prover<OT>
+where
+    OT: RCOTReceiver<bool, Block>,
+{
     type Error = Error;
 
     fn mark_public_raw(&mut self, slice: Slice) -> Result<()> {
@@ -212,11 +208,19 @@ impl<OT> View<Binary> for Prover<OT> {
     }
 
     fn mark_private_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_private_raw(slice).map_err(Error::from)
+        self.store.mark_private_raw(slice)?;
+
+        self.ot.alloc(slice.len()).map_err(Error::ot)?;
+
+        Ok(())
     }
 
     fn mark_blind_raw(&mut self, slice: Slice) -> Result<()> {
-        self.store.mark_blind_raw(slice).map_err(Error::from)
+        let res = self.store.mark_blind_raw(slice);
+
+        debug_assert!(res.is_err());
+
+        Ok(())
     }
 }
 
