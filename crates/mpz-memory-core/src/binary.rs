@@ -67,6 +67,16 @@ macro_rules! impl_uint {
                 Self::from_lsb0_iter(value.iter().by_vals())
             }
         }
+
+        impl ClearValue<Binary> for Vec<$ty> {
+            fn into_clear(self) -> BitVec {
+                BitVec::from_iter(self.into_iter_lsb0())
+            }
+
+            fn from_clear(value: BitVec) -> Self {
+                Self::from_lsb0_iter(value.iter().by_vals())
+            }
+        }
     };
 }
 
