@@ -1,5 +1,6 @@
 //! [`KOS15`](https://eprint.iacr.org/2015/546.pdf) oblivious transfer extension protocol.
 
+mod base_ot;
 mod receiver;
 mod sender;
 

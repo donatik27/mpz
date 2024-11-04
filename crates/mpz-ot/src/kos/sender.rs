@@ -128,7 +128,7 @@ where
 
                 let seeds = seeds.try_into().expect("seeds should be 128 long");
 
-                sender.setup(seeds)
+                sender.setup_with_id(seeds)
             }
             State::Extension(sender) => sender,
             State::Error => return Err(Error::state("can not flush, sender in error state")),

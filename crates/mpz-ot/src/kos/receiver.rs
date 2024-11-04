@@ -120,7 +120,7 @@ where
                 let (receiver, seeds) = {
                     let mut rng = thread_rng();
                     let seeds = std::array::from_fn(|_| rng.gen());
-                    (receiver.setup(seeds), seeds)
+                    (receiver.setup_with_id(seeds), seeds)
                 };
 
                 _ = base_ot.queue_send_ot(&seeds).map_err(Error::base_ot)?;

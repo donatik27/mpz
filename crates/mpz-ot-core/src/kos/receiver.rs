@@ -65,8 +65,10 @@ impl Receiver {
     ///
     /// # Arguments
     ///
-    /// * `seeds` - The receiver's rng seeds
-    pub fn setup(self, seeds: [[Block; 2]; CSP]) -> Receiver<state::Extension> {
+    /// * `id` - PRG stream id. Used to domain separate PRG streams if multiple
+    ///  extension instances use the same setup.
+    /// * `seeds` - PRG seeds.
+    pub fn setup_with_id(self, id: u64, seeds: [[Block; 2]; CSP]) -> Receiver<state::Extension> {
         Receiver {
             config: self.config,
             alloc: self.alloc,
@@ -75,7 +77,13 @@ impl Receiver {
             state: state::Extension {
                 rngs: seeds
                     .into_iter()
-                    .map(|seeds| seeds.map(|seed| Prg::from_seed(seed)))
+                    .map(|seeds| {
+                        seeds.map(|seed| {
+                            let mut prg = Prg::from_seed(seed);
+                            prg.set_stream_id(id);
+                            prg
+                        })
+                    })
                     .collect(),
                 msgs: Vec::default(),
                 choices: Vec::default(),
@@ -84,6 +92,15 @@ impl Receiver {
                 unchecked_choices: Vec::default(),
             },
         }
+    }
+
+    /// Complete the setup phase of the protocol.
+    ///
+    /// # Arguments
+    ///
+    /// * `seeds` - PRG seeds.
+    pub fn setup(self, seeds: [[Block; 2]; CSP]) -> Receiver<state::Extension> {
+        self.setup_with_id(0, seeds)
     }
 }
 

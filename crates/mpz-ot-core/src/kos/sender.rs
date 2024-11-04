@@ -74,9 +74,10 @@ impl Sender<state::Initialized> {
     ///
     /// # Arguments
     ///
-    /// * `delta` - The sender's base OT choice bits
-    /// * `seeds` - The rng seeds chosen during base OT
-    pub fn setup(self, seeds: [Block; CSP]) -> Sender<state::Extension> {
+    /// * `id` - PRG stream id. Used to domain separate PRG streams if multiple
+    ///  extension instances use the same setup.
+    /// * `seeds` - PRG seeds corresponding to `delta`.
+    pub fn setup_with_id(self, id: u64, seeds: [Block; CSP]) -> Sender<state::Extension> {
         Sender {
             config: self.config,
             alloc: self.alloc,
@@ -84,12 +85,28 @@ impl Sender<state::Initialized> {
             queue: self.queue,
             delta: self.delta,
             state: state::Extension {
-                rngs: seeds.into_iter().map(|seed| Prg::from_seed(seed)).collect(),
+                rngs: seeds
+                    .into_iter()
+                    .map(|seed| {
+                        let mut prg = Prg::from_seed(seed);
+                        prg.set_stream_id(id);
+                        prg
+                    })
+                    .collect(),
                 keys: Vec::default(),
                 extended: false,
                 unchecked_qs: Vec::default(),
             },
         }
+    }
+
+    /// Complete the setup phase of the protocol.
+    ///
+    /// # Arguments
+    ///
+    /// * `seeds` - PRG seeds corresponding to `delta`.
+    pub fn setup(self, seeds: [Block; CSP]) -> Sender<state::Extension> {
+        self.setup_with_id(0, seeds)
     }
 }
 
