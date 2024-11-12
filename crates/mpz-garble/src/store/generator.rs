@@ -32,10 +32,6 @@ impl<COT> GeneratorStore<COT> {
         self.core.is_committed(slice)
     }
 
-    pub(crate) fn is_set_keys(&self, slice: Slice) -> bool {
-        self.core.is_set_keys(slice)
-    }
-
     pub(crate) fn try_get_keys(&self, slice: Slice) -> Result<&[Key], Error> {
         self.core.try_get_keys(slice).map_err(Error::from)
     }

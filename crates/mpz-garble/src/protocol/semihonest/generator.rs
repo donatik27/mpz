@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
-use utils::filter_drain::FilterDrain;
+use utils::{
+    filter_drain::FilterDrain,
+    range::{Disjoint, RangeSet},
+};
 
 use mpz_common::{
     scoped_futures::{ScopedBoxFuture, ScopedFutureExt},
@@ -38,9 +41,21 @@ impl<COT> Generator<COT> {
     }
 
     fn take_preprocess_calls(&mut self) -> Vec<(Call, Slice)> {
-        let store = self.store.try_lock().unwrap();
+        let mut idx_outputs = RangeSet::default();
         self.call_stack
-            .filter_drain(|(call, _)| call.inputs().iter().all(|slice| store.is_set_keys(*slice)))
+            // Extract calls which have no dependencies on other prior calls.
+            .filter_drain(|(call, output)| {
+                if call
+                    .inputs()
+                    .iter()
+                    .all(|input| input.to_range().is_disjoint(&idx_outputs))
+                {
+                    idx_outputs |= output.to_range();
+                    true
+                } else {
+                    false
+                }
+            })
             .collect()
     }
 
