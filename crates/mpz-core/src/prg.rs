@@ -59,8 +59,6 @@ impl SeedableRng for PrgCore {
     }
 }
 
-impl CryptoRng for PrgCore {}
-
 /// AES-based PRG.
 ///
 /// This PRG is based on AES128 used in counter-mode to generate pseudo-random data streams.
@@ -88,11 +86,6 @@ impl RngCore for Prg {
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         self.0.fill_bytes(dest)
     }
-
-    #[inline(always)]
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.0.try_fill_bytes(dest)
-    }
 }
 
 impl SeedableRng for Prg {
@@ -104,8 +97,8 @@ impl SeedableRng for Prg {
     }
 
     #[inline(always)]
-    fn from_rng<R: RngCore>(rng: R) -> Result<Self, rand_core::Error> {
-        BlockRng::<PrgCore>::from_rng(rng).map(Prg)
+    fn from_rng(rng: &mut impl RngCore) -> Self {
+        Self(BlockRng::<PrgCore>::from_rng(rng))
     }
 }
 
@@ -147,7 +140,7 @@ impl Prg {
     /// Generate a random bool value.
     #[inline(always)]
     pub fn random_bool(&mut self) -> bool {
-        self.gen()
+        self.random()
     }
 
     /// Fill a bool slice with random bool values.
@@ -159,7 +152,7 @@ impl Prg {
     /// Generate a random byte value.
     #[inline(always)]
     pub fn random_byte(&mut self) -> u8 {
-        self.gen()
+        self.random()
     }
 
     /// Fill a byte slice with random values.
@@ -171,7 +164,7 @@ impl Prg {
     /// Generate a random block.
     #[inline(always)]
     pub fn random_block(&mut self) -> Block {
-        self.gen()
+        self.random()
     }
 
     /// Fill a block slice with random block values.
